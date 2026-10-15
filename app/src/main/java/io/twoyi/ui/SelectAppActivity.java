@@ -347,6 +347,11 @@ public class SelectAppActivity extends AppCompatActivity {
                 })
                 .done(stagedTasks -> runOnUiThread(() -> {
                     if (mInstallCancelled.get()) {
+                        // Cancelled between staging and install: nothing was handed to the
+                        // guest yet, so remove every staged file before reporting.
+                        for (InstallTask t : stagedTasks) {
+                            IOUtils.deleteAll(t.getFiles());
+                        }
                         finishBatch(null, true);
                         return;
                     }
