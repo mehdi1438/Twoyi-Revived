@@ -1,0 +1,2221 @@
+From fe2650e308c5ead77192f4be43ec3fb22bb22292 Mon Sep 17 00:00:00 2001
+From: "qwen.ai[bot]" <qwenlm-intl@service.alibaba.com>
+Date: Thu, 15 Oct 2026 18:34:20 +0000
+Subject: [PATCH 1/3] Phase 1: Implement batch multi-select app import into
+ guest
+
+- Add `InstallTask` model to encapsulate APK sets (base + splits) and labels for individual package installations.
+- Update `SelectAppActivity` to support multi-selection with a cap of 50 apps, adding "Select All" toggle and dynamic selection count UI.
+- Implement staging logic in `SelectAppActivity` to copy selected APKs to a guest-visible temp directory with proper permissions before installation.
+- Add disk space validation in `SelectAppActivity` to ensure sufficient free space in the guest storage before starting batch imports.
+- Extend `Installer` with `installBatch` method to sequentially install multiple tasks via adb, handling connection checks and per-task callbacks.
+- Refactor `Installer` to extract common adb environment setup and connection logic into helper methods (`adbEnvCmd`, `ensureConnected`).
+- Update `activity_createapp.xml` layout to include the new "Select All" button above the main action button.
+- Add localized strings for batch import features including max count warnings, progress summaries, and error messages in `strings.xml`.
+---
+ .../java/io/twoyi/ui/SelectAppActivity.java   | 310 +++++++++++++++++-
+ .../main/java/io/twoyi/utils/InstallTask.java |  39 +++
+ .../main/java/io/twoyi/utils/Installer.java   | 177 ++++++++--
+ .../main/res/layout/activity_createapp.xml    |  11 +
+ app/src/main/res/values/strings.xml           |   7 +
+ 5 files changed, 498 insertions(+), 46 deletions(-)
+ create mode 100644 app/src/main/java/io/twoyi/utils/InstallTask.java
+
+diff --git a/app/src/main/java/io/twoyi/ui/SelectAppActivity.java b/app/src/main/java/io/twoyi/ui/SelectAppActivity.java
+index 493e997..b0603cf 100644
+--- a/app/src/main/java/io/twoyi/ui/SelectAppActivity.java
++++ b/app/src/main/java/io/twoyi/ui/SelectAppActivity.java
+@@ -20,6 +20,7 @@ import android.graphics.ColorMatrix;
+ import android.graphics.ColorMatrixColorFilter;
+ import android.net.Uri;
+ import android.os.Bundle;
++import android.os.StatFs;
+ import android.os.SystemClock;
+ import android.text.TextUtils;
+ import android.util.Log;
+@@ -64,8 +65,10 @@ import io.twoyi.R;
+ import io.twoyi.utils.AppKV;
+ import io.twoyi.utils.CacheManager;
+ import io.twoyi.utils.IOUtils;
++import io.twoyi.utils.InstallTask;
+ import io.twoyi.utils.Installer;
+ import io.twoyi.utils.LogEvents;
++import io.twoyi.utils.RomManager;
+ import io.twoyi.utils.UIHelper;
+ import io.twoyi.utils.image.GlideModule;
+ 
+@@ -79,27 +82,41 @@ public class SelectAppActivity extends AppCompatActivity {
+ 
+     private static final int REQUEST_GET_FILE = 1;
+ 
++    // Max apps that can be selected for one batch import (staging + adb install is slow,
++    // and the guest's /data partition needs to hold every APK twice during commit).
++    private static final int MAX_BATCH_SELECT_COUNT = 50;
++
+     private static int TAG_KEY = R.id.create_app_list;
+ 
+     private ListAppAdapter mAdapter;
+     private final List<AppItem> mDisplayItems = new ArrayList<>();
+     private final List<AppItem> mAllApps = new ArrayList<>();
+-    private AppItem mSelectItem;
+     private TextView mEmptyView;
++    private ListView mListView;
+ 
+     private final Set<String> specifiedPackages = new HashSet<>();
+ 
++    // Batch import state (Phase 1: multi-select import into the guest)
++    private final AtomicBoolean mInstallCancelled = new AtomicBoolean(false);
++    private MaterialDialog mInstallProgressDialog;
++    private int mSelectedCount = 0;
++
+     @Override
+     protected void onCreate(@Nullable Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+         setContentView(R.layout.activity_createapp);
+ 
+-        ListView mListView = findViewById(R.id.create_app_list);
++        mListView = findViewById(R.id.create_app_list);
+         mAdapter = new ListAppAdapter();
+         mListView.setAdapter(mAdapter);
+         mEmptyView = findViewById(R.id.empty_view);
+         mListView.setEmptyView(mEmptyView);
+ 
++        TextView selectAllBtn = findViewById(R.id.select_all_btn);
++        if (selectAllBtn != null) {
++            selectAllBtn.setOnClickListener(v -> toggleSelectAll());
++        }
++
+         FloatingActionButton mFloatButton = findViewById(R.id.create_app_from_external);
+         mFloatButton.setColorNormalResId(R.color.colorPrimary);
+         mFloatButton.setColorPressedResId(R.color.colorPrimaryOpacity);
+@@ -169,36 +186,277 @@ public class SelectAppActivity extends AppCompatActivity {
+         // UpdateUtil.checkForceUpdate(this);
+     }
+ 
+-    private void selectComplete(Set<AppItem> pkgs) {
++    private void toggleSelectAll() {
++        if (mDisplayItems.isEmpty()) {
++            return;
++        }
++
++        boolean allSelected = true;
++        for (AppItem item : mDisplayItems) {
++            if (!item.selected) {
++                allSelected = false;
++                break;
++            }
++        }
+ 
+-        if (pkgs.size() != 1) {
++        boolean target = !allSelected;
++        int limit = 0;
++        for (AppItem item : mDisplayItems) {
++            if (target && !item.selected) {
++                // Keep the previous per-app guardrail: only 64-bit APKs can be imported.
++                if (!UIHelper.isApk64(item.applicationInfo.sourceDir)) {
++                    continue;
++                }
++                if (limit >= MAX_BATCH_SELECT_COUNT) {
++                    Toast.makeText(getApplicationContext(),
++                            getResources().getString(R.string.select_app_max_count, MAX_BATCH_SELECT_COUNT),
++                            Toast.LENGTH_SHORT).show();
++                    break;
++                }
++                item.selected = true;
++                limit++;
++            } else if (!target) {
++                item.selected = false;
++            }
++        }
+ 
+-            // TODO: support install mutilpe apps together
+-            Toast.makeText(getApplicationContext(), R.string.please_install_one_by_one, Toast.LENGTH_SHORT).show();
+-            return;
++        updateSelectionCount();
++        mAdapter.notifyDataSetChanged();
++    }
++
++    private void updateSelectionCount() {
++        int count = 0;
++        for (AppItem item : mAllApps) {
++            if (item.selected) {
++                count++;
++            }
+         }
++        mSelectedCount = count;
++
++        TextView selectAllBtn = findViewById(R.id.select_all_btn);
++        if (selectAllBtn != null) {
++            selectAllBtn.setText(count > 0
++                    ? getResources().getString(R.string.select_app_selected_count, count)
++                    : getString(R.string.select_app_select_all));
++        }
++    }
+ 
+-        ProgressDialog progressDialog = UIHelper.getProgressDialog(this);
+-        progressDialog.setCancelable(false);
+-        progressDialog.show();
++    private void selectComplete(Set<AppItem> pkgs) {
++
++        if (pkgs.isEmpty()) {
++            Toast.makeText(this, R.string.select_app_tips, Toast.LENGTH_SHORT).show();
++            return;
++        }
+ 
++        List<InstallTask> tasks = new ArrayList<>();
++        long totalBytes = 0;
+         for (AppItem pkg : pkgs) {
+             List<File> apks = new ArrayList<>();
+             ApplicationInfo applicationInfo = pkg.applicationInfo;
+ 
+             // main apk
+             String sourceDir = applicationInfo.sourceDir;
+-            apks.add(new File(sourceDir));
++            File baseApk = new File(sourceDir);
++            apks.add(baseApk);
++            totalBytes += baseApk.length();
+ 
+             String[] splitSourceDirs = applicationInfo.splitSourceDirs;
+             if (splitSourceDirs != null) {
+                 for (String splitSourceDir : splitSourceDirs) {
+-                    apks.add(new File(splitSourceDir));
++                    File splitApk = new File(splitSourceDir);
++                    apks.add(splitApk);
++                    totalBytes += splitApk.length();
+                 }
+             }
+ 
+-            startInstall(apks, progressDialog, false);
++            String label = String.valueOf(pkg.name) + " (" + pkg.pkg + ")";
++            tasks.add(new InstallTask(apks, label));
++        }
++
++        startBatchInstall(tasks, totalBytes);
++    }
++
++    /**
++     * Stage the selected APKs (base + splits) into a temp dir inside the guest-visible
++     * sdcard, then install them through Twoyi's real guest install mechanism (private
++     * adb server -> guest adbd). Staging is needed because the guest process cannot read
++     * the host app's private data dir where /data/app/*.apk normally lives.
++     */
++    private void startBatchInstall(List<InstallTask> tasks, long totalBytes) {
++
++        File stagingRoot = RomManager.getRomSdcardDir(getApplicationContext());
++        if (!stagingRoot.exists() || !stagingRoot.isDirectory()) {
++            Toast.makeText(getApplicationContext(), R.string.import_staging_failed, Toast.LENGTH_LONG).show();
++            return;
++        }
++
++        // Free-space check: require the APK payload plus a safety margin for adb's
++        // in-guest staging (it pushes to the device tmp before committing).
++        StatFs statFs = new StatFs(stagingRoot);
++        long available = statFs.getBlockSizeLong() * statFs.getAvailableBlocksLong();
++        long required = totalBytes + Math.max(totalBytes / 4, 32L * 1024 * 1024);
++        if (available < required) {
++            Toast.makeText(getApplicationContext(),
++                    getResources().getString(R.string.import_not_enough_space,
++                            formatSize(required), formatSize(available)),
++                    Toast.LENGTH_LONG).show();
++            return;
++        }
++
++        UIHelper.defer()
++                .when(() -> {
++                    File stageDir = new File(stagingRoot, ".twoyi_import_" + System.currentTimeMillis());
++                    //noinspection ResultOfMethodCallIgnored
++                    stageDir.mkdirs();
++                    // The guest mounts this tree; make staged files world-readable so
++                    // adbd (different uid inside the guest) can open them.
++                    //noinspection ResultOfMethodCallIgnored
++                    stageDir.setReadable(true, false);
++                    //noinspection ResultOfMethodCallIgnored
++                    stageDir.setExecutable(true, false);
++
++                    List<InstallTask> stagedTasks = new ArrayList<>();
++                    List<File> allStagedFiles = new ArrayList<>();
++                    try {
++                        for (InstallTask task : tasks) {
++                            List<File> staged = new ArrayList<>();
++                            for (File src : task.getFiles()) {
++                                if (mInstallCancelled.get()) {
++                                    throw new InterruptedException("cancelled");
++                                }
++                                File dst = new File(stageDir, sanitizeForFs(src.getName()));
++                                IOUtils.copyFile(src, dst);
++                                //noinspection ResultOfMethodCallIgnored
++                                dst.setReadable(true, false);
++                                staged.add(dst);
++                                allStagedFiles.add(dst);
++                            }
++                            stagedTasks.add(new InstallTask(staged, task.getLabel()));
++                        }
++                    } catch (Throwable e) {
++                        // Clean up partial staging on any failure/cancellation.
++                        IOUtils.deleteAll(allStagedFiles);
++                        //noinspection ResultOfMethodCallIgnored
++                        stageDir.delete();
++                        if (e instanceof RuntimeException) {
++                            throw (RuntimeException) e;
++                        }
++                        throw new RuntimeException(e.getMessage() == null ? e.toString() : e.getMessage(), e);
++                    }
++                    return stagedTasks;
++                })
++                .done(stagedTasks -> runOnUiThread(() -> {
++                    if (mInstallCancelled.get()) {
++                        finishBatch(null, true);
++                        return;
++                    }
++                    showInstallProgress(stagedTasks.size());
++                    Installer.installBatch(getApplicationContext(), stagedTasks, mInstallCancelled,
++                            new Installer.BatchInstallResult() {
++                                @Override
++                                public void onTaskStarted(int index, int total, String label) {
++                                    runOnUiThread(() -> {
++                                        if (mInstallProgressDialog != null && mInstallProgressDialog.isShowing()) {
++                                            mInstallProgressDialog.setMaxProgress(total);
++                                            mInstallProgressDialog.setProgress(index - 1);
++                                            mInstallProgressDialog.setContent(label);
++                                        }
++                                    });
++                                }
++
++                                @Override
++                                public void onTaskFinished(boolean success, String label, String msg) {
++                                    runOnUiThread(() -> {
++                                        if (mInstallProgressDialog != null && mInstallProgressDialog.isShowing()) {
++                                            mInstallProgressDialog.incrementProgress(1);
++                                        }
++                                        if (!success) {
++                                            failedLabels.add(label + ": " + msg);
++                                        } else {
++                                            successCount[0]++;
++                                        }
++                                    });
++                                }
++
++                                @Override
++                                public void onConnectionFailed(int taskCount) {
++                                    runOnUiThread(() -> finishBatch("Adb connect failed! Is the guest running?", false));
++                                }
++                            });
++                }))
++                .fail(err -> runOnUiThread(() -> {
++                    if (err instanceof InterruptedException || mInstallCancelled.get()) {
++                        finishBatch(null, true);
++                    } else {
++                        finishBatch(err.getMessage() == null ? err.toString() : err.getMessage(), false);
++                    }
++                }));
++    }
++
++    private final List<String> failedLabels = Collections.synchronizedList(new ArrayList<>());
++    private final int[] successCount = new int[1];
++
++    private void showInstallProgress(int total) {
++        dismissInstallDialog();
++        mInstallProgressDialog = UIHelper.getNumberProgressDialog(this);
++        mInstallProgressDialog.setMaxProgress(Math.max(total, 1));
++        mInstallProgressDialog.setOnCancelListener(dialog -> {
++            Log.i(TAG, "batch import cancelled by user");
++            mInstallCancelled.set(true);
++            finishBatch(null, true);
++        });
++        UIHelper.show(mInstallProgressDialog);
++    }
++
++    private void finishBatch(String fatalMsg, boolean cancelled) {
++        dismissInstallDialog();
++
++        List<String> failures = new ArrayList<>(failedLabels);
++        int succeeded = successCount[0];
++
++        StringBuilder sb = new StringBuilder();
++        if (fatalMsg != null) {
++            sb.append(fatalMsg).append('\n');
++        }
++        if (cancelled) {
++            sb.append(getString(R.string.import_cancelled)).append('\n');
++        }
++        sb.append(getResources().getString(R.string.import_result_summary, succeeded, failures.size()));
++        for (String f : failures) {
++            sb.append('\n').append(f);
++        }
++
++        failedLabels.clear();
++        successCount[0] = 0;
++        mInstallCancelled.set(false);
++
++        Toast.makeText(getApplicationContext(), sb.toString(), Toast.LENGTH_LONG).show();
++
++        if (fatalMsg == null && !cancelled && succeeded > 0) {
++            finish();
++        }
++    }
++
++    private void dismissInstallDialog() {
++        if (mInstallProgressDialog != null) {
++            UIHelper.dismiss(mInstallProgressDialog);
++            mInstallProgressDialog = null;
++        }
++    }
++
++    private static String sanitizeForFs(String name) {
++        // APK names from sourceDir are simple (<pkg>.apk / split_*.apk) but be defensive.
++        return name.replaceAll("[^A-Za-z0-9._\\-]", "_");
++    }
++
++    private static String formatSize(long bytes) {
++        if (bytes >= 1024L * 1024L * 1024L) {
++            return String.format(Locale.US, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
++        }
++        if (bytes >= 1024L * 1024L) {
++            return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
+         }
++        return String.format(Locale.US, "%.0f KB", bytes / 1024.0);
+     }
+ 
+     @Override
+@@ -415,6 +673,14 @@ public class SelectAppActivity extends AppCompatActivity {
+         });
+     }
+ 
++    @Override
++    protected void onDestroy() {
++        // Abort any in-flight batch import and drop the dialog to avoid window leaks.
++        mInstallCancelled.set(true);
++        dismissInstallDialog();
++        super.onDestroy();
++    }
++
+     private void loadAsync() {
+ 
+         mEmptyView.setText(null);
+@@ -507,6 +773,7 @@ public class SelectAppActivity extends AppCompatActivity {
+             mDisplayItems.clear();
+             mDisplayItems.addAll(v);
+             notifyDataSetChangedWithSort();
++            updateSelectionCount();
+ 
+             if (specified && !specifiedFound.get()) {
+                 // 如果是跳转过来的，但是没有对应的包名对应，那么提示用户。
+@@ -599,9 +866,9 @@ public class SelectAppActivity extends AppCompatActivity {
+             }
+             int position = (int) tag;
+ 
+-            mSelectItem = mDisplayItems.get(position);
++            AppItem item = mDisplayItems.get(position);
+ 
+-            boolean is64Bit = UIHelper.isApk64(mSelectItem.applicationInfo.sourceDir);
++            boolean is64Bit = UIHelper.isApk64(item.applicationInfo.sourceDir);
+ 
+             if (!is64Bit) {
+ 
+@@ -609,11 +876,18 @@ public class SelectAppActivity extends AppCompatActivity {
+                 return;
+             }
+ 
+-            for (int i = 0; i < mDisplayItems.size(); i++) {
+-                mDisplayItems.get(i).selected = position == i;
++            // Multi-select: toggle the tapped item, keep other selections (Phase 1).
++            if (!item.selected && mSelectedCount >= MAX_BATCH_SELECT_COUNT) {
++                Toast.makeText(getApplicationContext(),
++                        getResources().getString(R.string.select_app_max_count, MAX_BATCH_SELECT_COUNT),
++                        Toast.LENGTH_SHORT).show();
++                return;
+             }
+ 
+-            notifyDataSetChanged();
++            item.selected = !item.selected;
++
++            updateSelectionCount();
++            notifyDataSetChangedWithSort();
+         }
+     }
+ 
+diff --git a/app/src/main/java/io/twoyi/utils/InstallTask.java b/app/src/main/java/io/twoyi/utils/InstallTask.java
+new file mode 100644
+index 0000000..46f888f
+--- /dev/null
++++ b/app/src/main/java/io/twoyi/utils/InstallTask.java
+@@ -0,0 +1,39 @@
++/*
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
++ */
++
++package io.twoyi.utils;
++
++import java.io.File;
++import java.util.List;
++
++/**
++ * A single guest-install task: the APK set (base + splits) belonging to one package.
++ */
++
++public class InstallTask {
++
++    public interface Callback {
++        void onTaskStarted(int index, int total, String label);
++
++        void onTaskFinished(boolean success, String msg);
++    }
++
++    private final List<File> files;
++    private final String label;
++
++    public InstallTask(List<File> files, String label) {
++        this.files = files;
++        this.label = label;
++    }
++
++    public List<File> getFiles() {
++        return files;
++    }
++
++    public String getLabel() {
++        return label;
++    }
++}
+diff --git a/app/src/main/java/io/twoyi/utils/Installer.java b/app/src/main/java/io/twoyi/utils/Installer.java
+index 515e3a5..9c26984 100644
+--- a/app/src/main/java/io/twoyi/utils/Installer.java
++++ b/app/src/main/java/io/twoyi/utils/Installer.java
+@@ -22,6 +22,7 @@ import java.util.Collections;
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicBoolean;
+ 
+ import io.twoyi.R;
+ 
+@@ -33,10 +34,26 @@ public class Installer {
+         void onFail(List<File> files, String msg);
+     }
+ 
++    /**
++     * Callback for batch installs (one APK set per guest package). Invoked from the
++     * installer worker thread; UI consumers must hop back to the main thread themselves.
++     */
++    public interface BatchInstallResult {
++        void onTaskStarted(int index, int total, String label);
++
++        void onTaskFinished(boolean success, String label, String msg);
++
++        /** Called once when adb could not reach the guest at all; no task was attempted. */
++        void onConnectionFailed(int taskCount);
++    }
++
+     private static final String TAG = "Installer";
+ 
+     public static final int REQUEST_INSTALL_APP = 101;
+ 
++    private static final String CONNECT_TARGET = "localhost:22122";
++    private static final int ADB_PORT = 9563;
++
+     public static void installAsync(Context context, String path, InstallResult callback) {
+         installAsync(context, Collections.singletonList(new File(path)), callback);
+     }
+@@ -45,21 +62,108 @@ public class Installer {
+         new Thread(() -> install(context, files, callback)).start();
+     }
+ 
++    /**
++     * Install multiple apps (each entry is a base APK + its split APKs) into the guest
++     * through the same adb channel used for single installs. The adb server/connect step
++     * runs once for the whole batch; every task reports its own success/failure and the
++     * caller can cancel via {@code cancelled}.
++     */
++    public static void installBatch(Context context, List<InstallTask> tasks, AtomicBoolean cancelled,
++                                    BatchInstallResult callback) {
++        new Thread(() -> {
++            String envCmd = adbEnvCmd(context);
++            String adbPath = adbPath(context);
++
++            if (!ensureConnected(context, envCmd, adbPath)) {
++                cleanupStagedFiles(tasks);
++                if (callback != null) {
++                    callback.onConnectionFailed(tasks.size());
++                }
++                return;
++            }
++
++            int index = 0;
++            for (InstallTask task : tasks) {
++                index++;
++                if (cancelled.get()) {
++                    cleanupStagedFilesFrom(tasks, index - 1);
++                    return;
++                }
++                if (callback != null) {
++                    callback.onTaskStarted(index, tasks.size(), task.getLabel());
++                }
++                String error = installFiles(context, task.getFiles(), envCmd, adbPath);
++                // The guest adbd already consumed the APKs (successfully or not):
++                // the staged copy has served its purpose either way.
++                IOUtils.deleteAll(task.getFiles());
++                if (cancelled.get()) {
++                    cleanupStagedFilesFrom(tasks, index);
++                    return;
++                }
++                if (callback != null) {
++                    callback.onTaskFinished(error == null, task.getLabel(), error);
++                }
++            }
++        }).start();
++    }
++
++    /** Delete staged/temp APK files that were never handed to the guest. */
++    private static void cleanupStagedFiles(List<InstallTask> tasks) {
++        cleanupStagedFilesFrom(tasks, 0);
++    }
++
++    private static void cleanupStagedFilesFrom(List<InstallTask> tasks, int fromIndex) {
++        for (int i = fromIndex; i < tasks.size(); i++) {
++            try {
++                IOUtils.deleteAll(tasks.get(i).getFiles());
++            } catch (Throwable ignored) {
++            }
++        }
++    }
++
+     public static void install(Context context, List<File> files, InstallResult callback) {
+ 
+ //        Shell.enableVerboseLogging = true;
+ 
+-        String nativeLibraryDir = context.getApplicationInfo().nativeLibraryDir;
+-        String adbPath = nativeLibraryDir + File.separator + "libadb.so";
++        String envCmd = adbEnvCmd(context);
++        String adbPath = adbPath(context);
+ 
+-        String connectTarget = "localhost:22122";
++        if (!ensureConnected(context, envCmd, adbPath)) {
++            if (callback != null) {
++                callback.onFail(files, "Adb connect failed!");
++            }
++            return;
++        }
+ 
+-        final int ADB_PORT = 9563;
++        String error = installFiles(context, files, envCmd, adbPath);
+ 
+-        String adbCommand = String.format(Locale.US, "%s -P %d connect %s", adbPath, ADB_PORT, connectTarget);
++        if (callback == null) {
++            return;
++        }
++        if (error == null) {
++            callback.onSuccess(files);
++        } else {
++            callback.onFail(files, error);
++        }
++    }
++
++    private static String adbPath(Context context) {
++        String nativeLibraryDir = context.getApplicationInfo().nativeLibraryDir;
++        return nativeLibraryDir + File.separator + "libadb.so";
++    }
+ 
++    private static String adbEnvCmd(Context context) {
+         String envPath = context.getCacheDir().getAbsolutePath();
+-        String envCmd = String.format("export TMPDIR=%s;export HOME=%s;", envPath, envPath);
++        return String.format("export TMPDIR=%s;export HOME=%s;", envPath, envPath);
++    }
++
++    /**
++     * Start the private adb server (if not running) and connect it to the guest's adbd.
++     * Safe to call repeatedly; connecting when already connected is a no-op for adb.
++     */
++    private static boolean ensureConnected(Context context, String envCmd, String adbPath) {
++
++        String adbCommand = String.format(Locale.US, "%s -P %d connect %s", adbPath, ADB_PORT, CONNECT_TARGET);
+ 
+         String adbServerCommand = String.format(Locale.US, "%s -P %d nodaemon server", adbPath, ADB_PORT);
+         ShellUtil.newSh().newJob().add(envCmd).add(adbServerCommand).submit();
+@@ -88,47 +192,64 @@ public class Installer {
+         } catch (Throwable ignored) {
+         }
+ 
+-        if (!connected) {
+-            if (callback != null) {
+-                callback.onFail(files, "Adb connect failed!");
+-            }
+-            return;
+-        }
++        return connected;
++    }
++
++    /**
++     * Run `adb install`/`install-multiple` for one app (base + splits). Returns null on
++     * success, or a human-readable failure message.
++     */
++    private static String installFiles(Context context, List<File> files, String envCmd, String adbPath) {
+ 
+         StringBuilder sb = new StringBuilder();
+         for (File file : files) {
+-            sb.append(file.getAbsolutePath()).append(" ");
++            sb.append(shellQuote(file.getAbsolutePath())).append(" ");
+         }
+ 
+         String fileArgs = sb.toString();
+ 
+         String installCommand;
+         if (files.size() == 1) {
+-            installCommand = String.format(Locale.US, "%s -P %d -s %s install -t -r %s", adbPath, ADB_PORT, connectTarget, fileArgs);
++            installCommand = String.format(Locale.US, "%s -P %d -s %s install -t -r %s", adbPath, ADB_PORT, CONNECT_TARGET, fileArgs);
+         } else {
+             // http://aospxref.com/android-10.0.0_r47/xref/system/core/adb/client/adb_install.cpp#447
+-            installCommand = String.format(Locale.US, "%s -P %d -s %s install-multiple -t -r %s", adbPath, ADB_PORT, connectTarget, fileArgs);
++            installCommand = String.format(Locale.US, "%s -P %d -s %s install-multiple -t -r %s", adbPath, ADB_PORT, CONNECT_TARGET, fileArgs);
+         }
+ 
+         Log.w(TAG, "installCommand: " + installCommand);
+ 
+         Shell installShell = ShellUtil.newSh();
+ 
+-        installShell.newJob().add(envCmd).add(installCommand).to(new ArrayList<>(), new ArrayList<>()).submit(out1 -> {
+-            Log.w(TAG, "install result: " + out1.isSuccess());
+-
+-            if (callback == null) {
+-                return;
++        try {
++            // Blocking exec on the installer worker thread - keeps the batch sequential
++            // and avoids relying on async Job callbacks for per-app results.
++            Shell.Result out = installShell.newJob().add(envCmd).add(installCommand)
++                    .to(new ArrayList<>(), new ArrayList<>()).exec();
++
++            Log.w(TAG, "install result: " + out.isSuccess());
++            if (out.isSuccess()) {
++                return null;
+             }
+-            if (out1.isSuccess()) {
+-                callback.onSuccess(files);
+-            } else {
+-                String msg = Arrays.toString(out1.getErr().toArray(new String[0]));
+-                Log.w(TAG, "msg: " + msg);
+-
+-                callback.onFail(files, msg);
++            String msg = Arrays.toString(out.getErr().toArray(new String[0]));
++            if (msg == null || msg.length() == 0 || "[]".equals(msg)) {
++                msg = Arrays.toString(out.getOut().toArray(new String[0]));
++            }
++            Log.w(TAG, "msg: " + msg);
++            return msg;
++        } catch (Throwable e) {
++            Log.e(TAG, "installFiles error", e);
++            return e.getMessage() == null ? e.toString() : e.getMessage();
++        } finally {
++            try {
++                installShell.waitAndClose(1, TimeUnit.SECONDS);
++            } catch (Throwable ignored) {
+             }
+-        });
++        }
++    }
++
++    /** Single-quote a path for the `sh` shell used by libsu's non-root shell. */
++    private static String shellQuote(String path) {
++        return "'" + path.replace("'", "'\\''") + "'";
+     }
+ 
+     public static boolean checkFile(Context context, List<File> files) {
+diff --git a/app/src/main/res/layout/activity_createapp.xml b/app/src/main/res/layout/activity_createapp.xml
+index 4f64e81..1baed21 100644
+--- a/app/src/main/res/layout/activity_createapp.xml
++++ b/app/src/main/res/layout/activity_createapp.xml
+@@ -35,6 +35,17 @@
+             android:dividerHeight="1px"
+             android:scrollbars="vertical" />
+ 
++        <TextView
++            android:id="@+id/select_all_btn"
++            style="@android:style/Widget.Material.Button.Borderless"
++            android:layout_width="match_parent"
++            android:layout_height="40dp"
++            android:foreground="?android:attr/selectableItemBackground"
++            android:gravity="center"
++            android:text="@string/select_app_select_all"
++            android:textColor="@color/colorPrimary"
++            android:textSize="15sp" />
++
+         <TextView
+             android:id="@+id/create_app_btn"
+             style="@android:style/Widget.Material.Button"
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 50413e4..a04ea8d 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -57,6 +57,13 @@
+     <string name="import_app_from_file">Import app from APK</string>
+     <string name="unsupported_for_32bit_app">32 bit app is not supported :(</string>
+     <string name="please_install_one_by_one">Please install app one by one!</string>
++    <string name="select_app_select_all">Select All</string>
++    <string name="select_app_selected_count">%1$d selected (tap to deselect all)</string>
++    <string name="select_app_max_count">You can select at most %1$d apps per import.</string>
++    <string name="import_result_summary">Imported: %1$d, Failed: %2$d</string>
++    <string name="import_cancelled">Import cancelled.</string>
++    <string name="import_not_enough_space">Not enough space in guest storage: need %1$s, only %2$s free.</string>
++    <string name="import_staging_failed">Guest storage is not available yet; start the guest first.</string>
+     <string name="install_success">Install success!</string>
+     <string name="install_failed">Install failed: %1$s</string>
+     <string name="title_settings">Settings</string>
+-- 
+2.39.5
+
+
+From aba4e950a92c7e34a19a4558d90917ab367187bc Mon Sep 17 00:00:00 2001
+From: "qwen.ai[bot]" <qwenlm-intl@service.alibaba.com>
+Date: Thu, 15 Oct 2026 18:38:18 +0000
+Subject: [PATCH 2/3] Phase 1 follow-up: clean staged files on post-staging
+ cancel; add zh-CN/zh-TW/ja strings
+
+---
+ app/src/main/java/io/twoyi/ui/SelectAppActivity.java | 5 +++++
+ app/src/main/res/values-ja/strings.xml               | 7 +++++++
+ app/src/main/res/values-zh-rCN/strings.xml           | 7 +++++++
+ app/src/main/res/values-zh-rTW/strings.xml           | 7 +++++++
+ 4 files changed, 26 insertions(+)
+
+diff --git a/app/src/main/java/io/twoyi/ui/SelectAppActivity.java b/app/src/main/java/io/twoyi/ui/SelectAppActivity.java
+index b0603cf..3dd8fbc 100644
+--- a/app/src/main/java/io/twoyi/ui/SelectAppActivity.java
++++ b/app/src/main/java/io/twoyi/ui/SelectAppActivity.java
+@@ -347,6 +347,11 @@ public class SelectAppActivity extends AppCompatActivity {
+                 })
+                 .done(stagedTasks -> runOnUiThread(() -> {
+                     if (mInstallCancelled.get()) {
++                        // Cancelled between staging and install: nothing was handed to the
++                        // guest yet, so remove every staged file before reporting.
++                        for (InstallTask t : stagedTasks) {
++                            IOUtils.deleteAll(t.getFiles());
++                        }
+                         finishBatch(null, true);
+                         return;
+                     }
+diff --git a/app/src/main/res/values-ja/strings.xml b/app/src/main/res/values-ja/strings.xml
+index abc5f0a..07974f9 100644
+--- a/app/src/main/res/values-ja/strings.xml
++++ b/app/src/main/res/values-ja/strings.xml
+@@ -90,4 +90,11 @@
+     <string name="settings_key_shutdown">シャットダウン</string>
+     <string name="settings_key_reboot">再起動</string>
+     <string name="replace_rom_unofficial_tips">申し訳ございませんが、rom情報の編集と正式な作者名の使用を避けてください。 :)</string>
++    <string name="select_app_select_all">すべて選択</string>
++    <string name="select_app_selected_count">%1$d 件選択中（タップですべて解除）</string>
++    <string name="select_app_max_count">1回のインポートで最大 %1$d アプリまで選択できます。</string>
++    <string name="import_result_summary">インポート成功: %1$d、失敗: %2$d</string>
++    <string name="import_cancelled">インポートをキャンセルしました。</string>
++    <string name="import_not_enough_space">ゲストのストレージ容量が不足しています：必要 %1$s、空き %2$s。</string>
++    <string name="import_staging_failed">ゲストのストレージが利用できません。先にゲストを起動してください。</string>
+ </resources>
+diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
+index ab61b87..880ec48 100644
+--- a/app/src/main/res/values-zh-rCN/strings.xml
++++ b/app/src/main/res/values-zh-rCN/strings.xml
+@@ -90,4 +90,11 @@
+     <string name="settings_key_shutdown">关机</string>
+     <string name="settings_key_reboot">重启</string>
+     <string name="replace_rom_unofficial_tips">抱歉，请修改 ROM 描述信息，并且尽量不要使用官方作者的名字 :)</string>
++    <string name="select_app_select_all">全选</string>
++    <string name="select_app_selected_count">已选择 %1$d 个（点击取消全选）</string>
++    <string name="select_app_max_count">每次导入最多选择 %1$d 个应用。</string>
++    <string name="import_result_summary">导入成功：%1$d，失败：%2$d</string>
++    <string name="import_cancelled">导入已取消。</string>
++    <string name="import_not_enough_space">客户机存储空间不足：需要 %1$s，仅剩 %2$s。</string>
++    <string name="import_staging_failed">客户机存储尚不可用，请先启动客户机。</string>
+ </resources>
+\ No newline at end of file
+diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
+index c7dd6e6..fc4ac2a 100644
+--- a/app/src/main/res/values-zh-rTW/strings.xml
++++ b/app/src/main/res/values-zh-rTW/strings.xml
+@@ -90,4 +90,11 @@
+     <string name="settings_key_shutdown">關機</string>
+     <string name="settings_key_reboot">重啟</string>
+     <string name="replace_rom_unofficial_tips">抱歉，請修改 ROM 描述資訊，並且儘量不要使用官方作者的名字 :)</string>
++    <string name="select_app_select_all">全選</string>
++    <string name="select_app_selected_count">已選擇 %1$d 個（點擊取消全選）</string>
++    <string name="select_app_max_count">每次匯入最多選擇 %1$d 個應用。</string>
++    <string name="import_result_summary">匯入成功：%1$d，失敗：%2$d</string>
++    <string name="import_cancelled">匯入已取消。</string>
++    <string name="import_not_enough_space">客戶機儲存空間不足：需要 %1$s，僅剩 %2$s。</string>
++    <string name="import_staging_failed">客戶機儲存暫不可用，請先啟動客戶機。</string>
+ </resources>
+-- 
+2.39.5
+
+
+From 75e4daaa99c9be55d4b09721a9d33742f95135db Mon Sep 17 00:00:00 2001
+From: "qwen.ai[bot]" <qwenlm-intl@service.alibaba.com>
+Date: Thu, 15 Oct 2026 19:02:57 +0000
+Subject: [PATCH 3/3] Phase 2: floating guest window
+
+---
+ app/rs/src/lib.rs                             |  37 ++
+ app/src/main/AndroidManifest.xml              |   6 +
+ .../main/java/io/twoyi/Render2Activity.java   | 178 +++++--
+ app/src/main/java/io/twoyi/Renderer.java      |   8 +
+ .../java/io/twoyi/TwoyiStatusManager.java     |   7 +
+ .../twoyi/floating/FloatingGuestService.java  | 498 ++++++++++++++++++
+ .../twoyi/floating/FloatingWindowManager.java |  63 +++
+ .../java/io/twoyi/ui/GuestSurfaceView.java    | 155 ++++++
+ .../drawable/bg_floating_resize_handle.xml    |  24 +
+ .../main/res/drawable/ic_floating_close.xml   |  16 +
+ .../res/drawable/ic_floating_fullscreen.xml   |  16 +
+ .../res/drawable/ic_floating_minimize.xml     |  16 +
+ app/src/main/res/layout/ac_render.xml         |  12 +
+ .../main/res/layout/floating_guest_window.xml |  84 +++
+ app/src/main/res/values/strings.xml           |  13 +
+ 15 files changed, 1098 insertions(+), 35 deletions(-)
+ create mode 100644 app/src/main/java/io/twoyi/floating/FloatingGuestService.java
+ create mode 100644 app/src/main/java/io/twoyi/floating/FloatingWindowManager.java
+ create mode 100644 app/src/main/java/io/twoyi/ui/GuestSurfaceView.java
+ create mode 100644 app/src/main/res/drawable/bg_floating_resize_handle.xml
+ create mode 100644 app/src/main/res/drawable/ic_floating_close.xml
+ create mode 100644 app/src/main/res/drawable/ic_floating_fullscreen.xml
+ create mode 100644 app/src/main/res/drawable/ic_floating_minimize.xml
+ create mode 100644 app/src/main/res/layout/floating_guest_window.xml
+
+diff --git a/app/rs/src/lib.rs b/app/rs/src/lib.rs
+index 7819344..ba14e36 100644
+--- a/app/rs/src/lib.rs
++++ b/app/rs/src/lib.rs
+@@ -107,6 +107,32 @@ pub fn renderer_init(
+     }
+ }
+ 
++#[no_mangle]
++pub fn renderer_attach(
++    env: JNIEnv,
++    _clz: jclass,
++    surface: jobject,
++) {
++    debug!("renderer_attach");
++
++    // Only meaningful once the renderer/guest is running; before that this is a no-op and
++    // the normal renderer_init path will own the first real surface.
++    if RENDERER_STARTED.load(Ordering::Acquire) {
++        let window = unsafe { ndk_sys::ANativeWindow_fromSurface(env.get_native_interface(), surface) };
++        if window.is_null() {
++            error!("renderer_attach: ANativeWindow_fromSurface was null!");
++            return;
++        }
++        let win = window as *mut c_void;
++        let width = unsafe { ndk_sys::ANativeWindow_getWidth(win) };
++        let height = unsafe { ndk_sys::ANativeWindow_getHeight(win) };
++        unsafe {
++            renderer_bindings::setNativeWindow(win);
++            renderer_bindings::resetSubWindow(win, 0, 0, width, height, width, height, 1.0, 0.0);
++        }
++    }
++}
++
+ #[no_mangle]
+ pub fn renderer_reset_window(
+     env: JNIEnv,
+@@ -128,8 +154,18 @@ pub fn renderer_reset_window(
+ pub fn renderer_remove_window(env: JNIEnv, _clz: jclass, surface: jobject) {
+     debug!("renderer_remove_window");
+ 
++    // The Java side guards this (GuestSurfaceView only calls removeWindow when it is not in a
++    // reparent handoff), but be defensive: removing the sub-window while no renderer/guest is
++    // running would pass a dangling native window into libOpenglRender.
++    if !RENDERER_STARTED.load(Ordering::Acquire) {
++        return;
++    }
++
+     unsafe {
+         let window = ndk_sys::ANativeWindow_fromSurface(env.get_native_interface(), surface);
++        if window.is_null() {
++            return;
++        }
+         renderer_bindings::removeSubWindow(window as *mut c_void);
+     }
+ }
+@@ -196,6 +232,7 @@ unsafe fn JNI_OnLoad(jvm: JavaVM, _reserved: *mut c_void) -> jint {
+     let class_name: &str = "io/twoyi/Renderer";
+     let jni_methods = [
+         jni_method!(init, renderer_init, "(Landroid/view/Surface;Ljava/lang/String;FFI)V"),
++        jni_method!(attach, renderer_attach, "(Landroid/view/Surface;)V"),
+         jni_method!(
+             resetWindow,
+             renderer_reset_window,
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 3650f11..54bd9cb 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -10,6 +10,8 @@
+ 
+     <uses-permission android:name="android.permission.INTERNET" />
+     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
++    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+ 
+     <application
+         android:allowBackup="true"
+@@ -52,6 +54,10 @@
+             android:label="@string/title_settings"
+             android:screenOrientation="portrait" />
+ 
++        <service
++            android:name=".floating.FloatingGuestService"
++            android:exported="false" />
++
+         <provider
+             android:name="androidx.core.content.FileProvider"
+             android:authorities="io.twoyi.fileprovider"
+diff --git a/app/src/main/java/io/twoyi/Render2Activity.java b/app/src/main/java/io/twoyi/Render2Activity.java
+index defbc2d..5a85b1d 100644
+--- a/app/src/main/java/io/twoyi/Render2Activity.java
++++ b/app/src/main/java/io/twoyi/Render2Activity.java
+@@ -36,12 +36,15 @@ import android.widget.TextView;
+ import android.widget.Toast;
+ 
+ import androidx.annotation.NonNull;
++import androidx.annotation.Nullable;
+ 
+ import com.cleveroad.androidmanimation.LoadingAnimationView;
+ 
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicBoolean;
+ 
++import io.twoyi.floating.FloatingGuestService;
++import io.twoyi.floating.FloatingWindowManager;
+ import io.twoyi.utils.AppKV;
+ import io.twoyi.utils.LogEvents;
+ import io.twoyi.utils.NavUtils;
+@@ -55,52 +58,51 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
+ 
+     private static final String TAG = "Render2Activity";
+ 
+-    private SurfaceView mSurfaceView;
++    /** The shared guest surface; may be handed off to the floating overlay (Phase 2). */
++    public static GuestSurfaceView sGuestSurfaceView;
+ 
+-    private ViewGroup mRootView;
+-    private LoadingAnimationView mLoadingView;
+-    private TextView mLoadingText;
+-    private View mLoadingLayout;
+-    private View mBootLogView;
++    private SurfaceView mSurfaceView;
+ 
+     private final AtomicBoolean mIsExtracting = new AtomicBoolean(false);
+ 
+-    private final SurfaceHolder.Callback mSurfaceCallback = new SurfaceHolder.Callback() {
+-        @Override
+-        public void surfaceCreated(@NonNull SurfaceHolder holder) {
+-            Surface surface = holder.getSurface();
+-            WindowManager windowManager = getWindowManager();
+-            Display defaultDisplay = windowManager.getDefaultDisplay();
+-            DisplayMetrics displayMetrics = new DisplayMetrics();
+-            defaultDisplay.getRealMetrics(displayMetrics);
+-
+-            float xdpi = displayMetrics.xdpi;
+-            float ydpi = displayMetrics.ydpi;
+-
+-            Renderer.init(surface, RomManager.getLoaderPath(getApplicationContext()), xdpi, ydpi, (int) getBestFps());
+-
+-            Log.i(TAG, "surfaceCreated");
+-        }
++    private ViewGroup mRootView;
++    private View mFloatButton;
++    private static final int REQUEST_OVERLAY_PERMISSION = 0x2F01;
++    private boolean mPendingFloatSettings = false;
+ 
+-        @Override
+-        public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
+-            Surface surface = holder.getSurface();
+-            Renderer.resetWindow(surface, 0, 0, mSurfaceView.getWidth(), mSurfaceView.getHeight());
+-            Log.i(TAG, "surfaceChanged: " + mSurfaceView.getWidth() + "x" + mSurfaceView.getHeight());
++    @Override
++    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
++        super.onActivityResult(requestCode, resultCode, data);
++        if (requestCode == REQUEST_OVERLAY_PERMISSION) {
++            mPendingFloatSettings = false;
++            if (FloatingWindowManager.hasOverlayPermission(this)) {
++                goFloating();
++            } else {
++                // Graceful denial: keep running fullscreen, just tell the user why.
++                Toast.makeText(this, R.string.floating_permission_required, Toast.LENGTH_LONG).show();
++            }
+         }
++    }
+ 
+-        @Override
+-        public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
+-            Renderer.removeWindow(holder.getSurface());
+-            Log.i(TAG, "surfaceDestroyed!");
+-        }
+-    };
++    private LoadingAnimationView mLoadingView;
++    private TextView mLoadingText;
++    private View mLoadingLayout;
++    private View mBootLogView;
+ 
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         boolean started = TwoyiStatusManager.getInstance().isStarted();
+         Log.i(TAG, "onCreate: " + savedInstanceState + " isStarted: " + started);
+ 
++        if (started && FloatingGuestService.isRunning()) {
++            // The floating overlay owns the guest surface right now. Don't create a second
++            // fullscreen surface onto the running renderer and don't reboot the guest --
++            // just bring the overlay back and finish.
++            FloatingGuestService.restore(this);
++            finish();
++            return;
++        }
++
+         if (started) {
+             // we have been started, but WTF we are onCreate again? just reboot ourself.
+             finish();
+@@ -118,13 +120,23 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
+         setContentView(R.layout.ac_render);
+         mRootView = findViewById(R.id.root);
+ 
+-        mSurfaceView = new SurfaceView(this);
+-        mSurfaceView.getHolder().addCallback(mSurfaceCallback);
++        if (sGuestSurfaceView == null) {
++            sGuestSurfaceView = new GuestSurfaceView(this);
++        } else if (!TwoyiStatusManager.getInstance().isStarted()
++                && !sGuestSurfaceView.isSurfaceAlive()) {
++            // Reused view from a previous session whose renderer is not up: this surface will
++            // perform the cold boot when it is created.
++            sGuestSurfaceView.markForBoot();
++        }
++        mSurfaceView = sGuestSurfaceView;
+ 
+         mLoadingLayout = findViewById(R.id.loadingLayout);
+         mLoadingView = findViewById(R.id.loading);
+         mLoadingText = findViewById(R.id.loadingText);
+         mBootLogView = findViewById(R.id.bootlog);
++        mFloatButton = findViewById(R.id.floatBtn);
++        mFloatButton.setVisibility(View.GONE);
++        mFloatButton.setOnClickListener(v -> goFloating());
+ 
+         mLoadingLayout.setVisibility(View.VISIBLE);
+         mLoadingView.startAnimation();
+@@ -135,11 +147,92 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
+ 
+     }
+ 
++    /**
++     * Hand the guest surface over to the floating overlay service. Only proceeds when the
++     * handoff token was granted by the service (so surfaceDestroyed must NOT tear the
++     * renderer down); otherwise the activity keeps owning the surface.
++     */
++    public void goFloating() {
++        if (!TwoyiStatusManager.getInstance().isStarted()) {
++            Toast.makeText(this, R.string.floating_not_started_yet, Toast.LENGTH_SHORT).show();
++            return;
++        }
++
++        // Overlay-permission flow with graceful denial: ask once via the system settings
++        // screen; if the user still denies (or is on Android 12+ where full-screen app
++        // "display over other apps" is restricted), we simply keep rendering fullscreen.
++        if (!FloatingWindowManager.hasOverlayPermission(this)) {
++            mPendingFloatSettings = true;
++            try {
++                startActivityForResult(
++                        FloatingWindowManager.overlayPermissionIntent(this),
++                        REQUEST_OVERLAY_PERMISSION);
++            } catch (Throwable t) {
++                // No settings screen available on this device/ROM: stay fullscreen.
++                mPendingFloatSettings = false;
++                Toast.makeText(this, R.string.floating_permission_required, Toast.LENGTH_LONG).show();
++            }
++            return;
++        }
++
++        GuestSurfaceView view = sGuestSurfaceView;
++        if (view == null || !view.requestHandoff()) {
++            Toast.makeText(this, R.string.floating_handoff_failed, Toast.LENGTH_SHORT).show();
++            return;
++        }
++
++        // Offer the view first: the service's onStartCommand runs on this same main thread but
++        // only AFTER goFloating returns, so takePending() is guaranteed to see it.
++        FloatingWindowManager.offer(view);
++
++        if (!FloatingGuestService.startFloating(this)) {
++            // Permission denied or service refused: keep rendering fullscreen here.
++            view.endHandoff();
++            FloatingWindowManager.clearPending();
++            return;
++        }
++
++        // Await the detach on the next layout pass so the overlay window is created first;
++        // beginDetachHandoff suppresses removeWindow during the reparent.
++        mRootView.post(() -> {
++            if (sGuestSurfaceView == null) {
++                return;
++            }
++            sGuestSurfaceView.beginDetachHandoff();
++            mRootView.removeView(sGuestSurfaceView);
++            sGuestSurfaceView = null;
++            finish();
++        });
++    }
++
++    @Override
++    protected void onResume() {
++        super.onResume();
++        if (mFloatButton != null) {
++            mFloatButton.setVisibility(TwoyiStatusManager.getInstance().isStarted() ? View.VISIBLE : View.GONE);
++        }
++        // The overlay settings screen may have been closed via BACK instead of "allow":
++        // re-check the grant when we come back so a denied request settles gracefully.
++        if (mPendingFloatSettings && !FloatingWindowManager.hasOverlayPermission(this)) {
++            mPendingFloatSettings = false;
++            Toast.makeText(this, R.string.floating_permission_required, Toast.LENGTH_LONG).show();
++        }
++    }
++
+     @Override
+     protected void onRestoreInstanceState(@NonNull Bundle savedInstanceState) {
+         super.onRestoreInstanceState(savedInstanceState);
+         Log.i(TAG, "onRestoreInstanceState: " + savedInstanceState);
+ 
++        if (FloatingGuestService.isRunning() || sGuestSurfaceView != null) {
++            // In/for floating mode the overlay owns (or will re-attach) the surface; a rotation
++            // or recreation must NOT reboot the guest. Just make sure the view is parented back.
++            if (mRootView != null && sGuestSurfaceView != null && sGuestSurfaceView.getParent() == null) {
++                mRootView.addView(sGuestSurfaceView, 0);
++            }
++            return;
++        }
++
+         // we don't support state restore, just reboot.
+         finish();
+         RomManager.reboot(this);
+@@ -227,10 +320,25 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
+             runOnUiThread(() -> {
+                 mLoadingView.stopAnimation();
+                 mLoadingLayout.setVisibility(View.GONE);
++                if (mFloatButton != null) {
++                    mFloatButton.setVisibility(View.VISIBLE);
++                }
+             });
+         }, "waiting-boot").start();
+     }
+ 
++    @Override
++    protected void onDestroy() {
++        super.onDestroy();
++        // Fullscreen teardown only: if the floating overlay is not running, nobody else owns
++        // the guest surface anymore -- drop it so a later boot creates a fresh one. If the
++        // overlay IS running it already re-parented (and may be holding) this view, so leave
++        // the static reference to it alone.
++        if (!FloatingGuestService.isRunning()) {
++            sGuestSurfaceView = null;
++        }
++    }
++
+     @Override
+     public void onWindowFocusChanged(boolean hasFocus) {
+         super.onWindowFocusChanged(hasFocus);
+diff --git a/app/src/main/java/io/twoyi/Renderer.java b/app/src/main/java/io/twoyi/Renderer.java
+index 47ebe58..3b10144 100644
+--- a/app/src/main/java/io/twoyi/Renderer.java
++++ b/app/src/main/java/io/twoyi/Renderer.java
+@@ -33,6 +33,14 @@ public class Renderer {
+ 
+     public static native void init(Surface surface, String loader, float xdpi, float ydpi, int fps);
+ 
++    /**
++     * Re-attach an existing renderer to a new surface without booting anything. Used when the
++     * guest view is handed off between {@link io.twoyi.Render2Activity} and the floating overlay.
++     * Safe no-op if the renderer/guest was never started; otherwise identical to the already-started
++     * branch of {@link #init} (setNativeWindow + resetSubWindow).
++     */
++    public static native void attach(Surface surface);
++
+     public static native void resetWindow(Surface surface, int top, int left, int width, int height);
+ 
+     public static native void removeWindow(Surface surface);
+diff --git a/app/src/main/java/io/twoyi/TwoyiStatusManager.java b/app/src/main/java/io/twoyi/TwoyiStatusManager.java
+index 32c19dd..7515174 100644
+--- a/app/src/main/java/io/twoyi/TwoyiStatusManager.java
++++ b/app/src/main/java/io/twoyi/TwoyiStatusManager.java
+@@ -80,6 +80,13 @@ public class TwoyiStatusManager {
+             return;
+         }
+ 
++        // If the floating overlay owns the guest view, bring the overlay back instead of
++        // launching a second fullscreen surface onto the running renderer.
++        if (io.twoyi.floating.FloatingGuestService.isRunning()) {
++            io.twoyi.floating.FloatingGuestService.restore(context);
++            return;
++        }
++
+         Intent intent;
+         if (mShown.get()) {
+             intent = new Intent(Intent.ACTION_MAIN);
+diff --git a/app/src/main/java/io/twoyi/floating/FloatingGuestService.java b/app/src/main/java/io/twoyi/floating/FloatingGuestService.java
+new file mode 100644
+index 0000000..28cd626
+--- /dev/null
++++ b/app/src/main/java/io/twoyi/floating/FloatingGuestService.java
+@@ -0,0 +1,498 @@
++/*
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
++ */
++
++package io.twoyi.floating;
++
++import android.app.Notification;
++import android.app.NotificationChannel;
++import android.app.NotificationManager;
++import android.app.PendingIntent;
++import android.app.Service;
++import android.content.Context;
++import android.content.Intent;
++import android.graphics.PixelFormat;
++import android.os.Build;
++import android.os.IBinder;
++import android.util.DisplayMetrics;
++import android.view.Gravity;
++import android.view.LayoutInflater;
++import android.view.MotionEvent;
++import android.view.View;
++import android.view.ViewGroup;
++import android.view.WindowManager;
++import android.widget.FrameLayout;
++import android.widget.TextView;
++import android.widget.Toast;
++
++import androidx.annotation.NonNull;
++import androidx.annotation.Nullable;
++import androidx.core.app.NotificationCompat;
++
++import io.twoyi.R;
++import io.twoyi.Render2Activity;
++import io.twoyi.TwoyiStatusManager;
++import io.twoyi.ui.GuestSurfaceView;
++import io.twoyi.utils.RomManager;
++
++/**
++ * Foreground service that hosts the guest display in a {@code TYPE_APPLICATION_OVERLAY} window.
++ *
++ * The service does NOT create a second renderer or a second guest: it takes ownership of the
++ * single shared {@link GuestSurfaceView} (handed over by {@link Render2Activity} through
++ * {@link FloatingWindowManager}) and adds it to its own overlay window. Because reparenting a
++ * SurfaceView destroys and recreates its surface, the handoff token in
++ * {@link GuestSurfaceView#requestHandoff()} suppresses {@code Renderer.removeWindow} during the
++ * transition; the new window's {@code surfaceCreated} re-attaches the native window via
++ * {@code Renderer.attach}.
++ *
++ * The guest keeps running when the activity is closed because the guest process is a child of
++ * the app process, which stays alive while this foreground service runs.
++ */
++public class FloatingGuestService extends Service {
++
++    private static final String TAG = "FloatingGuestService";
++    private static final String CHANNEL_ID = "twoyi_floating";
++    private static final int NOTIFICATION_ID = 0x5A01;
++
++    public static final String ACTION_START_FLOATING = "io.twoyi.action.FLOATING";
++    /** Start the floating window and boot the guest directly into it (no fullscreen first). */
++    public static final String ACTION_BOOT_FLOATING = "io.twoyi.action.BOOT_FLOATING";
++    /** Close the floating window and stop the service (notification action / close button). */
++    public static final String ACTION_STOP_FLOATING = "io.twoyi.action.STOP_FLOATING";
++
++    /** Non-null while the service owns the guest surface; used as an isRunning() flag. */
++    @Nullable
++    private static volatile GuestSurfaceView sOwnedView;
++    @Nullable
++    private static volatile FloatingGuestService sInstance;
++
++    private WindowManager mWindowManager;
++    private View mRootView;
++    private FrameLayout mChrome;
++    private GuestSurfaceView mGuestView;
++    private WindowManager.LayoutParams mParams;
++    private boolean mMinimized = false;
++    private boolean mBootRequested = false;
++
++    // ---------------------------------------------------------------- statics
++
++    public static boolean isRunning() {
++        return sOwnedView != null;
++    }
++
++    /**
++     * Start the overlay taking over the currently displayed guest surface.
++     *
++     * @return false if the overlay permission is missing (the caller keeps rendering fullscreen)
++     *         or the service could not be started.
++     */
++    public static boolean startFloating(Context context) {
++        if (!FloatingWindowManager.hasOverlayPermission(context)) {
++            Toast.makeText(context, R.string.floating_permission_required, Toast.LENGTH_LONG).show();
++            return false;
++        }
++        if (!isRunning()) {
++            Intent intent = new Intent(context, FloatingGuestService.class)
++                    .setAction(ACTION_START_FLOATING);
++            startForegroundServiceCompat(context, intent);
++        }
++        return true;
++    }
++
++    /**
++     * Boot the guest straight into the floating window (used from the launcher entry).
++     *
++     * @return false if the overlay permission is missing; the caller should then send the user
++     *         to {@link FloatingWindowManager#overlayPermissionIntent}.
++     */
++    public static boolean startBootFloating(Context context) {
++        if (!FloatingWindowManager.hasOverlayPermission(context)) {
++            return false;
++        }
++        Intent intent = new Intent(context, FloatingGuestService.class)
++                .setAction(ACTION_BOOT_FLOATING);
++        startForegroundServiceCompat(context, intent);
++        return true;
++    }
++
++    /** Bring the overlay back to the front / un-minimize it. */
++    public static void restore(Context context) {
++        FloatingGuestService service = sInstance;
++        if (service == null) {
++            // Not running anymore: fall back to the normal fullscreen activity.
++            context.startActivity(new Intent(context, Render2Activity.class)
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
++            return;
++        }
++        service.runOnUiThread(() -> {
++            if (service.mMinimized) {
++                service.setMinimized(false);
++            }
++            if (service.mRootView != null) {
++                service.mRootView.setVisibility(View.VISIBLE);
++            }
++        });
++    }
++
++    private static void startForegroundServiceCompat(Context context, Intent intent) {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
++            context.startForegroundService(intent);
++        } else {
++            context.startService(intent);
++        }
++    }
++
++    // ---------------------------------------------------------------- lifecycle
++
++    @Nullable
++    @Override
++    public IBinder onBind(Intent intent) {
++        return null;
++    }
++
++    @Override
++    public int onStartCommand(@Nullable Intent intent, int flags, int startId) {
++        String action = intent == null ? null : intent.getAction();
++        if (ACTION_BOOT_FLOATING.equals(action)) {
++            mBootRequested = true;
++        }
++
++        if (isRunning()) {
++            restore(this);
++            return START_NOT_STICKY;
++        }
++
++        startOwnForegroundNotification();
++
++        if (!FloatingWindowManager.hasOverlayPermission(this)) {
++            // Revoked between check and start: bail out gracefully, nothing was leaked.
++            stopSelf();
++            return START_NOT_STICKY;
++        }
++
++        try {
++            createOverlay();
++        } catch (Exception e) {
++            // WindowAddFailed etc.: never leave a half-state behind.
++            android.util.Log.e(TAG, "failed to create overlay", e);
++            cleanup();
++            stopSelf();
++            return START_NOT_STICKY;
++        }
++        sInstance = this;
++        return START_NOT_STICKY;
++    }
++
++    @Override
++    public void onDestroy() {
++        super.onDestroy();
++        cleanup();
++    }
++
++    // ---------------------------------------------------------------- overlay
++
++    private void createOverlay() {
++        mWindowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
++
++        DisplayMetrics dm = getResources().getDisplayMetrics();
++        int width = Math.min(dm.widthPixels, dp(400));
++        int height = Math.max(dp(240), (int) (width * 16f / 9f));
++        if (height > dm.heightPixels - dp(80)) {
++            height = dm.heightPixels - dp(80);
++            width = (int) (height * 9f / 16f);
++        }
++
++        // FLAG_NOT_FOCUSABLE: the overlay must never steal input focus; guest keys are handled
++        // through the surface's own touch stream and the HOME-on-back mapping in GuestSurfaceView.
++        final boolean handoff = FloatingWindowManager.hasPendingHandoff();
++
++        mRootView = LayoutInflater.from(this).inflate(R.layout.floating_guest_window, null);
++        mChrome = mRootView.findViewById(R.id.floating_chrome);
++        TextView title = mRootView.findViewById(R.id.floating_title);
++        View minimize = mRootView.findViewById(R.id.floating_minimize);
++        View close = mRootView.findViewById(R.id.floating_close);
++        View fullscreen = mRootView.findViewById(R.id.floating_fullscreen);
++        View resizeHandle = mRootView.findViewById(R.id.floating_resize_handle);
++        FrameLayout guestContainer = mRootView.findViewById(R.id.floating_guest_container);
++
++        title.setText(R.string.floating_notification_title);
++        title.setOnTouchListener(mDragTouchListener);
++        minimize.setOnClickListener(v -> setMinimized(true));
++        close.setOnClickListener(v -> stopSelf());
++        fullscreen.setOnClickListener(v -> goFullscreen());
++
++        GuestSurfaceView view = FloatingWindowManager.takePending();
++        if (view != null) {
++            // Handoff from the activity: arm the detach suppression BEFORE we attach the view
++            // to our window so no removeWindow/init races can happen.
++            view.beginDetachHandoff();
++        } else {
++            view = new GuestSurfaceView(this);
++        }
++        mGuestView = view;
++        sOwnedView = view;
++
++        // Cold boot into the overlay (launcher "Boot in floating window"). Deliberately minimal:
++        // we only support it when the ROM is already extracted and no upgrade is pending --
++        // extraction needs the activity's progress UI, so any other state falls back to the
++        // normal fullscreen boot path. RomManager.initRootfs mirrors Render2Activity.bootSystem.
++        if (!TwoyiStatusManager.getInstance().isStarted() && mBootRequested) {
++            boolean forceInstall = io.twoyi.utils.AppKV.getBooleanConfig(
++                    getApplicationContext(), io.twoyi.utils.AppKV.FORCE_ROM_BE_RE_INSTALL, false);
++            boolean canBootDirectly = RomManager.romExist(this) && !forceInstall
++                    && !RomManager.needsUpgrade(this);
++            if (canBootDirectly) {
++                RomManager.initRootfs(this);
++                view.markForBoot();
++            } else {
++                // Not yet offer()'d, so nothing to clear; just don't own anything.
++                mGuestView = null;
++                sOwnedView = null;
++                stopSelf();
++                startActivity(new Intent(this, Render2Activity.class)
++                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
++                return;
++            }
++        }
++
++        guestContainer.addView(view, new FrameLayout.LayoutParams(
++                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
++        if (handoff) {
++            // The activity detaches the view on ITS main thread after startForegroundService
++            // returned; that detach (surfaceDestroyed) is suppressed by beginDetachHandoff.
++            // End the suppression only once our window's surface is actually alive, so a late
++            // destroy callback can never tear the renderer down while we are displaying it.
++            view.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
++                @Override
++                public void surfaceCreated(@NonNull android.view.SurfaceHolder holder) {
++                    view.getHolder().removeCallback(this);
++                    view.endHandoff();
++                }
++
++                @Override
++                public void surfaceChanged(@NonNull android.view.SurfaceHolder holder, int format, int w, int h) {
++                }
++
++                @Override
++                public void surfaceDestroyed(@NonNull android.view.SurfaceHolder holder) {
++                }
++            });
++        } else {
++            mRootView.post(() -> {
++                GuestSurfaceView v = mGuestView;
++                if (v != null) {
++                    v.endHandoff();
++                }
++            });
++        }
++
++        resizeHandle.setOnTouchListener(mResizeTouchListener);
++
++        int type = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
++                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
++                : WindowManager.LayoutParams.TYPE_PHONE;
++        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
++                width, height, type,
++                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
++                        | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
++                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
++                PixelFormat.TRANSLUCENT);
++        params.gravity = Gravity.TOP | Gravity.START;
++        params.x = dp(16);
++        params.y = dp(80);
++        mParams = params;
++
++        mWindowManager.addView(mRootView, params);
++
++        if (mBootRequested && !TwoyiStatusManager.getInstance().isStarted()) {
++            Toast.makeText(this, R.string.floating_booting, Toast.LENGTH_LONG).show();
++        }
++    }
++
++    /** Move the overlay back into a fullscreen activity. */
++    private void goFullscreen() {
++        // Publish the view first so Render2Activity.onCreate finds it already "offered";
++        // stopSelf()'s cleanup then hands it over with the detach suppression armed (no
++        // removeWindow while reparenting) and the activity's surfaceCreated re-attaches.
++        GuestSurfaceView view = mGuestView;
++        if (view != null) {
++            Render2Activity.sGuestSurfaceView = view;
++            FloatingWindowManager.offer(view);
++        }
++        mGuestView = null;
++        sOwnedView = null;
++        stopSelf();
++        startActivity(new Intent(this, Render2Activity.class)
++                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
++    }
++
++    private void setMinimized(boolean minimized) {
++        mMinimized = minimized;
++        if (minimized) {
++            mChrome.setVisibility(View.GONE);
++            mGuestView.setVisibility(View.GONE);
++        } else {
++            mChrome.setVisibility(View.VISIBLE);
++            mGuestView.setVisibility(View.VISIBLE);
++        }
++    }
++
++    // ---------------------------------------------------------------- gestures
++
++    private float mDownRawX, mDownRawY, mStartX, mStartY;
++    private boolean mMoved;
++
++    private final View.OnTouchListener mDragTouchListener = (v, event) -> {
++        switch (event.getActionMasked()) {
++            case MotionEvent.ACTION_DOWN:
++                mDownRawX = event.getRawX();
++                mDownRawY = event.getRawY();
++                mStartX = mParams.x;
++                mStartY = mParams.y;
++                mMoved = false;
++                return true;
++            case MotionEvent.ACTION_MOVE:
++                mParams.x = (int) (mStartX + event.getRawX() - mDownRawX);
++                mParams.y = (int) (mStartY + event.getRawY() - mDownRawY);
++                mMoved = true;
++                applyParams();
++                return true;
++            case MotionEvent.ACTION_UP:
++                snapToNearestEdge(event);
++                return true;
++            default:
++                return false;
++        }
++    };
++
++    /** Edge snapping: pull the window flush against the nearest horizontal edge on release. */
++    private void snapToNearestEdge(MotionEvent up) {
++        if (!mMoved) {
++            return; // simple tap, keep position
++        }
++        DisplayMetrics dm = getResources().getDisplayMetrics();
++        int centerX = mParams.x + (mRootView.getWidth() > 0 ? mRootView.getWidth() / 2 : 0);
++        if (centerX < dm.widthPixels / 2) {
++            mParams.x = -mRootView.getWidth() + dp(32); // peek at left edge
++        } else {
++            mParams.x = dm.widthPixels - dp(32);         // peek at right edge
++        }
++        applyParams();
++    }
++
++    private float mResizeDownX, mResizeDownY;
++    private int mStartW, mStartH;
++
++    private final View.OnTouchListener mResizeTouchListener = (v, event) -> {
++        switch (event.getActionMasked()) {
++            case MotionEvent.ACTION_DOWN:
++                mResizeDownX = event.getRawX();
++                mResizeDownY = event.getRawY();
++                mStartW = mRootView.getWidth();
++                mStartH = mRootView.getHeight();
++                return true;
++            case MotionEvent.ACTION_MOVE:
++                int w = Math.max(dp(160), mStartW + (int) (event.getRawX() - mResizeDownX));
++                int h = Math.max(dp(120), mStartH + (int) (event.getRawY() - mResizeDownY));
++                mParams.width = w;
++                mParams.height = h;
++                applyParams();
++                return true;
++            default:
++                return false;
++        }
++    };
++
++    private void applyParams() {
++        try {
++            if (mWindowManager != null && mRootView != null && mRootView.isAttachedToWindow()) {
++                mWindowManager.updateViewLayout(mRootView, mParams);
++            }
++        } catch (IllegalArgumentException e) {
++            // View detached underneath us; ignore, cleanup will follow.
++        }
++    }
++
++    // ---------------------------------------------------------------- teardown
++
++    private void cleanup() {
++        // Removing the root view destroys the guest surface. When we hand the view back to a
++        // fullscreen activity (goFullscreen) or drop it entirely, arm the detach suppression so
++        // surfaceDestroyed does NOT call Renderer.removeWindow: the renderer must stay alive
++        // while no surface is attached; the next window's surfaceCreated re-attaches it via
++        // Renderer.attach. (If the whole process dies afterwards -- e.g. RomManager.shutdown --
++        // removing sub-windows would be pointless anyway.)
++        try {
++            if (mGuestView != null) {
++                mGuestView.beginDetachHandoff();
++            }
++            if (mWindowManager != null && mRootView != null) {
++                mWindowManager.removeView(mRootView);
++            }
++        } catch (Exception ignored) {
++        }
++        mRootView = null;
++        mChrome = null;
++        if (mGuestView != null) {
++            // The view survives (statically referenced) but its surface is gone; drop our
++            // ownership so isRunning() goes false. The next fullscreen attach re-points the
++            // renderer via Renderer.attach.
++            sOwnedView = null;
++            Render2Activity.sGuestSurfaceView = mGuestView;
++            mGuestView = null;
++        }
++        sOwnedView = null;
++        FloatingWindowManager.clearPending();
++        if (sInstance == this) {
++            sInstance = null;
++        }
++    }
++
++    // ---------------------------------------------------------------- notification
++
++    private void startOwnForegroundNotification() {
++        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
++            NotificationChannel channel = new NotificationChannel(CHANNEL_ID,
++                    getString(R.string.floating_notification_title),
++                    NotificationManager.IMPORTANCE_LOW);
++            nm.createNotificationChannel(channel);
++        }
++
++        PendingIntent contentIntent = PendingIntent.getService(this, 1,
++                new Intent(this, FloatingGuestService.class).setAction(ACTION_START_FLOATING),
++                pendingFlags());
++
++        Intent stopIntent = new Intent(this, FloatingGuestService.class)
++                .setAction(ACTION_STOP_FLOATING);
++        PendingIntent stopPendingIntent = PendingIntent.getService(this, 2, stopIntent, pendingFlags());
++
++        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
++                .setSmallIcon(R.mipmap.ic_launcher)
++                .setContentTitle(getString(R.string.floating_notification_title))
++                .setContentText(getString(R.string.floating_notification_text))
++                .setOngoing(true)
++                .setContentIntent(contentIntent)
++                .addAction(0, getString(R.string.floating_close), stopPendingIntent)
++                .build();
++
++        // compileSdk 31 / targetSdk 27: no foreground service type is required or available
++        // (FOREGROUND_SERVICE_TYPE_SPECIAL_USE only exists from API 34). Plain two-arg call.
++        startForeground(NOTIFICATION_ID, notification);
++    }
++
++    private static int pendingFlags() {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++            return PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT;
++        }
++        return PendingIntent.FLAG_UPDATE_CURRENT;
++    }
++
++    private int dp(int value) {
++        float density = getResources().getDisplayMetrics().density;
++        return (int) (value * density + 0.5f);
++    }
++}
+diff --git a/app/src/main/java/io/twoyi/floating/FloatingWindowManager.java b/app/src/main/java/io/twoyi/floating/FloatingWindowManager.java
+new file mode 100644
+index 0000000..212eaa1
+--- /dev/null
++++ b/app/src/main/java/io/twoyi/floating/FloatingWindowManager.java
+@@ -0,0 +1,63 @@
++/*
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
++ */
++
++package io.twoyi.floating;
++
++import android.content.Context;
++import android.content.Intent;
++import android.net.Uri;
++import android.os.Build;
++import android.provider.Settings;
++
++import io.twoyi.ui.GuestSurfaceView;
++
++/**
++ * Holds the guest surface during the handoff between {@link io.twoyi.Render2Activity} and
++ * {@link FloatingGuestService}, so neither side needs a reference to the other's Context
++ * (avoids leaking an Activity into the Service and vice versa).
++ */
++public final class FloatingWindowManager {
++
++    private static volatile GuestSurfaceView sPendingHandoff;
++
++    private FloatingWindowManager() {
++    }
++
++    /** Called by Render2Activity.goFloating() before starting the service. */
++    public static void offer(GuestSurfaceView view) {
++        sPendingHandoff = view;
++    }
++
++    /** Called by the service when it takes over; returns null if nothing was offered. */
++    public static GuestSurfaceView takePending() {
++        GuestSurfaceView view = sPendingHandoff;
++        sPendingHandoff = null;
++        return view;
++    }
++
++    /** True while a handoff is in flight (activity finished, service not up yet). */
++    public static boolean hasPendingHandoff() {
++        return sPendingHandoff != null;
++    }
++
++    /** Drop an offered surface (used when the overlay fails to start after the activity left). */
++    public static void clearPending() {
++        sPendingHandoff = null;
++    }
++
++    public static boolean hasOverlayPermission(Context context) {
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
++            return Settings.canDrawOverlays(context);
++        }
++        // Pre-M the permission is granted at install time (kept for safety).
++        return true;
++    }
++
++    public static Intent overlayPermissionIntent(Context context) {
++        return new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
++                Uri.parse("package:" + context.getPackageName()));
++    }
++}
+diff --git a/app/src/main/java/io/twoyi/ui/GuestSurfaceView.java b/app/src/main/java/io/twoyi/ui/GuestSurfaceView.java
+new file mode 100644
+index 0000000..4513d89
+--- /dev/null
++++ b/app/src/main/java/io/twoyi/ui/GuestSurfaceView.java
+@@ -0,0 +1,155 @@
++/*
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
++ */
++
++package io.twoyi.ui;
++
++import android.content.Context;
++import android.view.KeyEvent;
++import android.view.MotionEvent;
++import android.view.SurfaceHolder;
++import android.view.SurfaceView;
++
++import androidx.annotation.NonNull;
++
++import io.twoyi.Renderer;
++
++/**
++ * The guest display surface, decoupled from any specific window so that it can be
++ * reparented between {@link io.twoyi.Render2Activity} and the floating overlay
++ * ({@link io.twoyi.floating.FloatingGuestService}) without tearing the renderer down.
++ *
++ * While {@link #mDetachInProgress} is true (a reparent handoff), the surface callbacks
++ * are suppressed: we never call {@code Renderer.removeWindow} mid-handoff because the
++ * native side would remove the sub-window while the guest is still running, and we never
++ * re-run {@code Renderer.init} for an already-started renderer.
++ */
++public class GuestSurfaceView extends SurfaceView {
++
++    private volatile boolean mHandoffAllowed = false;
++    private volatile boolean mDetachInProgress = false;
++    private volatile boolean mSurfaceAlive = false;
++
++    /** Called by Render2Activity when this view is created fresh (before any boot). */
++    public void markForBoot() {
++        mShouldBootOnSurface = true;
++    }
++
++    private volatile boolean mShouldBootOnSurface = false;
++
++    private static float[] hostDpi(android.content.Context context) {
++        android.util.DisplayMetrics dm = context.getResources().getDisplayMetrics();
++        return new float[]{dm.xdpi, dm.ydpi};
++    }
++
++    private final SurfaceHolder.Callback mCallback = new SurfaceHolder.Callback() {
++        @Override
++        public void surfaceCreated(@NonNull SurfaceHolder holder) {
++            mSurfaceAlive = true;
++            if (mDetachInProgress) {
++                return;
++            }
++            if (mShouldBootOnSurface && !io.twoyi.TwoyiStatusManager.getInstance().isStarted()) {
++                // First real surface of a cold boot: this is the ONLY place where the guest
++                // process gets spawned (Renderer.init -> Rust renderer_init -> fork ./init).
++                mShouldBootOnSurface = false;
++                float[] dpi = hostDpi(getContext());
++                Renderer.init(holder.getSurface(),
++                        io.twoyi.utils.RomManager.getLoaderPath(getContext()),
++                        dpi[0], dpi[1], 45);
++                return;
++            }
++            // Already-booted handoff (activity <-> overlay): just re-point the renderer at
++            // the new surface; never boots anything.
++            Renderer.attach(holder.getSurface());
++        }
++
++        @Override
++        public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
++            if (mDetachInProgress || !holder.getSurface().isValid()) {
++                return;
++            }
++            Renderer.resetWindow(holder.getSurface(), 0, 0, width, height);
++        }
++
++        @Override
++        public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
++            mSurfaceAlive = false;
++            if (mDetachInProgress) {
++                // Reparent handoff: the renderer keeps running, the new host window's
++                // surfaceCreated will re-attach the native window. Do NOT removeWindow.
++                return;
++            }
++            Renderer.removeWindow(holder.getSurface());
++        }
++    };
++
++    /** True while a live surface exists (used by the overlay to avoid booting onto a dead one). */
++    public boolean isSurfaceAlive() {
++        return mSurfaceAlive;
++    }
++
++    /**
++     * Boot directly onto an already-valid surface (used by the floating overlay when the guest
++     * was started from the service without ever having an activity surface). Same parameters
++     * as the cold-boot branch of surfaceCreated.
++     */
++    public void bootOnCurrentSurface(android.view.Surface surface) {
++        mShouldBootOnSurface = false;
++        float[] dpi = hostDpi(getContext());
++        Renderer.init(surface,
++                io.twoyi.utils.RomManager.getLoaderPath(getContext()),
++                dpi[0], dpi[1], 45);
++    }
++
++    public GuestSurfaceView(Context context) {
++        super(context);
++        getHolder().addCallback(mCallback);
++    }
++
++    /**
++     * Called by the overlay service when it wants to take over the surface. Only then may
++     * the activity detach the view (this arms the suppression of removeWindow during the
++     * handoff). Without this token, removing the view from the activity would destroy the
++     * surface and tear the renderer down while the guest is still alive.
++     */
++    public boolean requestHandoff() {
++        if (!isAttachedToWindow()) {
++            return false;
++        }
++        mHandoffAllowed = true;
++        return true;
++    }
++
++    /** Begin the detach half of the handoff (suppresses surfaceDestroyed -> removeWindow). */
++    public void beginDetachHandoff() {
++        mDetachInProgress = true;
++    }
++
++    /** End the handoff once the view has been attached to its new parent window. */
++    public void endHandoff() {
++        mDetachInProgress = false;
++        mHandoffAllowed = false;
++    }
++
++    public boolean isHandoffAllowed() {
++        return mHandoffAllowed;
++    }
++
++    @Override
++    public boolean onTouchEvent(MotionEvent event) {
++        Renderer.handleTouch(event);
++        return true;
++    }
++
++    @Override
++    public boolean onKeyDown(int keyCode, KeyEvent event) {
++        if (keyCode == KeyEvent.KEYCODE_BACK) {
++            Renderer.sendKeycode(KeyEvent.KEYCODE_HOME);
++            return true;
++        }
++        return super.onKeyDown(keyCode, event);
++    }
++}
+diff --git a/app/src/main/res/drawable/bg_floating_resize_handle.xml b/app/src/main/res/drawable/bg_floating_resize_handle.xml
+new file mode 100644
+index 0000000..cab8345
+--- /dev/null
++++ b/app/src/main/res/drawable/bg_floating_resize_handle.xml
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ This Source Code Form is subject to the terms of the Mozilla Public
++  ~ License, v. 2.0. If a copy of the MPL was not distributed with this
++  ~ file, You can obtain one at https://mozilla.org/MPL/2.0/.
++  -->
++<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
++    <item>
++        <shape android:shape="rectangle">
++            <solid android:color="#40FFFFFF" />
++        </shape>
++    </item>
++    <item android:gravity="bottom|end">
++        <rotate
++            android:fromDegrees="-45"
++            android:pivotX="80%"
++            android:pivotY="80%">
++            <shape android:shape="rectangle">
++                <size android:width="14dp" android:height="2dp" />
++                <solid android:color="#CCFFFFFF" />
++            </shape>
++        </rotate>
++    </item>
++</layer-list>
+diff --git a/app/src/main/res/drawable/ic_floating_close.xml b/app/src/main/res/drawable/ic_floating_close.xml
+new file mode 100644
+index 0000000..412abba
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_floating_close.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ This Source Code Form is subject to the terms of the Mozilla Public
++  ~ License, v. 2.0. If a copy of the MPL was not distributed with this
++  ~ file, You can obtain one at https://mozilla.org/MPL/2.0/.
++  -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24"
++    android:tint="#FFFFFF">
++    <path
++        android:fillColor="@android:color/white"
++        android:pathData="M19,6.41L17.59,5 12,10.59 6.41,5 5,6.41 10.59,12 5,17.59 6.41,19 12,13.41 17.59,19 19,17.59 13.41,12 19,6.41z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_floating_fullscreen.xml b/app/src/main/res/drawable/ic_floating_fullscreen.xml
+new file mode 100644
+index 0000000..87105f6
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_floating_fullscreen.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ This Source Code Form is subject to the terms of the Mozilla Public
++  ~ License, v. 2.0. If a copy of the MPL was not distributed with this
++  ~ file, You can obtain one at https://mozilla.org/MPL/2.0/.
++  -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24"
++    android:tint="#FFFFFF">
++    <path
++        android:fillColor="@android:color/white"
++        android:pathData="M7,14H5v5h5v-2H7V14zM5,10h2V7h3V5H5V10zM17,17h-3v2h5v-5h-2V17zM14,5v2h3v3h2V5H14z" />
++</vector>
+diff --git a/app/src/main/res/drawable/ic_floating_minimize.xml b/app/src/main/res/drawable/ic_floating_minimize.xml
+new file mode 100644
+index 0000000..83bdae8
+--- /dev/null
++++ b/app/src/main/res/drawable/ic_floating_minimize.xml
+@@ -0,0 +1,16 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ This Source Code Form is subject to the terms of the Mozilla Public
++  ~ License, v. 2.0. If a copy of the MPL was not distributed with this
++  ~ file, You can obtain one at https://mozilla.org/MPL/2.0/.
++  -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24"
++    android:tint="#FFFFFF">
++    <path
++        android:fillColor="@android:color/white"
++        android:pathData="M6,13h12v-2H6V13z" />
++</vector>
+diff --git a/app/src/main/res/layout/ac_render.xml b/app/src/main/res/layout/ac_render.xml
+index 349d8d7..fc9cf46 100644
+--- a/app/src/main/res/layout/ac_render.xml
++++ b/app/src/main/res/layout/ac_render.xml
+@@ -50,4 +50,16 @@
+ 
+     </RelativeLayout>
+ 
++    <!-- Phase 2: floating-window handoff button, shown once the guest has booted. -->
++    <ImageButton
++        android:id="@+id/floatBtn"
++        android:layout_width="48dp"
++        android:layout_height="48dp"
++        android:layout_gravity="top|end"
++        android:layout_margin="12dp"
++        android:background="?android:attr/selectableItemBackgroundBorderless"
++        android:contentDescription="@string/floating_btn_desc"
++        android:src="@drawable/ic_floating_minimize"
++        android:visibility="gone" />
++
+ </FrameLayout>
+\ No newline at end of file
+diff --git a/app/src/main/res/layout/floating_guest_window.xml b/app/src/main/res/layout/floating_guest_window.xml
+new file mode 100644
+index 0000000..8ac945a
+--- /dev/null
++++ b/app/src/main/res/layout/floating_guest_window.xml
+@@ -0,0 +1,84 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!--
++  ~ This Source Code Form is subject to the terms of the Mozilla Public
++  ~ License, v. 2.0. If a copy of the MPL was not distributed with this
++  ~ file, You can obtain one at https://mozilla.org/MPL/2.0/.
++  -->
++
++<!-- Floating guest window chrome. The root is added by FloatingGuestService with
++     TYPE_APPLICATION_OVERLAY; drag by the title bar, resize via the bottom-right handle. -->
++<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:background="#E0000000"
++    android:orientation="vertical">
++
++    <LinearLayout
++        android:id="@+id/floating_chrome"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:background="#CC222222"
++        android:gravity="center_vertical"
++        android:orientation="horizontal"
++        android:paddingLeft="8dp"
++        android:paddingRight="4dp">
++
++        <TextView
++            android:id="@+id/floating_title"
++            android:layout_width="0dp"
++            android:layout_height="wrap_content"
++            android:layout_weight="1"
++            android:ellipsize="end"
++            android:maxLines="1"
++            android:paddingTop="6dp"
++            android:paddingBottom="6dp"
++            android:textColor="@color/white"
++            android:textSize="13sp" />
++
++        <ImageButton
++            android:id="@+id/floating_minimize"
++            android:layout_width="36dp"
++            android:layout_height="36dp"
++            android:background="?android:attr/selectableItemBackgroundBorderless"
++            android:contentDescription="@string/floating_minimize"
++            android:src="@drawable/ic_floating_minimize" />
++
++        <ImageButton
++            android:id="@+id/floating_fullscreen"
++            android:layout_width="36dp"
++            android:layout_height="36dp"
++            android:background="?android:attr/selectableItemBackgroundBorderless"
++            android:contentDescription="@string/floating_open_fullscreen"
++            android:src="@drawable/ic_floating_fullscreen" />
++
++        <ImageButton
++            android:id="@+id/floating_close"
++            android:layout_width="36dp"
++            android:layout_height="36dp"
++            android:background="?android:attr/selectableItemBackgroundBorderless"
++            android:contentDescription="@string/floating_close"
++            android:src="@drawable/ic_floating_close" />
++    </LinearLayout>
++
++    <FrameLayout
++        android:id="@+id/floating_guest_container"
++        android:layout_width="match_parent"
++        android:layout_height="0dp"
++        android:layout_weight="1"
++        android:background="@android:color/black" />
++
++    <!-- Resize affordance in the corner (the whole view is the touch target). -->
++    <FrameLayout
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content">
++
++        <View
++            android:id="@+id/floating_resize_handle"
++            android:layout_width="28dp"
++            android:layout_height="28dp"
++            android:layout_gravity="bottom|end"
++            android:background="@drawable/bg_floating_resize_handle"
++            android:contentDescription="@string/floating_resize" />
++    </FrameLayout>
++
++</LinearLayout>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index a04ea8d..bcc4e0a 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -99,4 +99,17 @@
+     <string name="settings_key_shutdown">Shutdown</string>
+     <string name="settings_key_reboot">Reboot</string>
+     <string name="replace_rom_unofficial_tips">Sorry, please edit the rom info and avoid using official author name :)</string>
++
++    <!-- Phase 2: floating guest window -->
++    <string name="floating_notification_title">Twoyi guest</string>
++    <string name="floating_notification_text">Android guest is running in a floating window</string>
++    <string name="floating_permission_required">To use the floating window, allow Twoyi to display over other apps in system settings.</string>
++    <string name="floating_not_started_yet">Wait until the guest has finished booting before switching to the floating window.</string>
++    <string name="floating_handoff_failed">Could not switch to the floating window; staying fullscreen.</string>
++    <string name="floating_booting">Starting the guest in the floating window…</string>
++    <string name="floating_btn_desc">Switch to floating window</string>
++    <string name="floating_close">Close</string>
++    <string name="floating_minimize">Minimize</string>
++    <string name="floating_open_fullscreen">Open fullscreen</string>
++    <string name="floating_resize">Resize</string>
+ </resources>
+-- 
+2.39.5
+
