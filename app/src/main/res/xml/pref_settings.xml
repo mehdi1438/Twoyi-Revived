@@ -27,6 +27,55 @@
     </PreferenceCategory>
 
 
+    <PreferenceCategory android:title="@string/settings_category_display">
+
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="@string/settings_key_custom_resolution"
+            android:summary="@string/settings_custom_resolution_summary"
+            android:title="@string/settings_custom_resolution_title" />
+
+        <EditTextPreference
+            android:dependency="@string/settings_key_custom_resolution"
+            android:dialogTitle="@string/settings_display_width_title"
+            android:inputType="number"
+            android:key="@string/settings_custom_width_key"
+            android:title="@string/settings_display_width_title" />
+
+        <EditTextPreference
+            android:dependency="@string/settings_key_custom_resolution"
+            android:dialogTitle="@string/settings_display_height_title"
+            android:inputType="number"
+            android:key="@string/settings_custom_height_key"
+            android:title="@string/settings_display_height_title" />
+
+        <EditTextPreference
+            android:dependency="@string/settings_key_custom_resolution"
+            android:dialogTitle="@string/settings_dpi_title"
+            android:inputType="number"
+            android:key="@string/settings_custom_dpi_key"
+            android:title="@string/settings_dpi_title" />
+
+        <ListPreference
+            android:dependency="@string/settings_key_custom_resolution"
+            android:entries="@array/display_presets"
+            android:entryValues="@array/display_presets"
+            android:key="@string/settings_custom_preset_key"
+            android:title="@string/settings_display_preset_title" />
+
+        <Preference
+            android:key="@string/settings_key_restore_defaults"
+            android:summary="@string/settings_restore_defaults_summary"
+            android:title="@string/settings_restore_defaults_title" />
+
+        <Preference
+            android:enabled="false"
+            android:key="@string/settings_key_restart_note"
+            android:selectable="false"
+            android:summary="@string/settings_restart_required_note" />
+
+    </PreferenceCategory>
+
     <PreferenceCategory android:title="@string/settings_category_advanced">
 
 

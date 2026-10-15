@@ -13,8 +13,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.preference.EditTextPreference;
+import android.preference.ListPreference;
 import android.preference.Preference;
 import android.preference.PreferenceFragment;
+import android.preference.SwitchPreference;
 import android.provider.DocumentsContract;
 import android.view.MenuItem;
 import android.view.View;
@@ -201,6 +204,155 @@ public class SettingsActivity extends AppCompatActivity {
                 UIHelper.startActivity(getContext(), AboutActivity.class);
                 return true;
             });
+
+            setupDisplayPreferences();
+        }
+
+        // ---- Phase 3: custom resolution and DPI ----
+
+        private SwitchPreference mCustomResSwitch;
+        private EditTextPreference mWidthPref;
+        private EditTextPreference mHeightPref;
+        private EditTextPreference mDpiPref;
+        private ListPreference mPresetPref;
+
+        private void setupDisplayPreferences() {
+            Context context = getActivity();
+
+            mCustomResSwitch = findPreference(getString(R.string.settings_key_custom_resolution));
+            mWidthPref = findPreference(getString(R.string.settings_custom_width_key));
+            mHeightPref = findPreference(getString(R.string.settings_custom_height_key));
+            mDpiPref = findPreference(getString(R.string.settings_custom_dpi_key));
+            mPresetPref = findPreference(getString(R.string.settings_custom_preset_key));
+
+            if (mCustomResSwitch == null || mWidthPref == null || mHeightPref == null
+                    || mDpiPref == null || mPresetPref == null) {
+                return;
+            }
+
+            // The switch state lives in AppKV (the runtime reads it from there), so mirror it
+            // into the preference instead of using a separate SharedPreferences file.
+            boolean enabled = AppKV.getBooleanConfig(context, AppKV.CUSTOM_RESOLUTION_ENABLED, false);
+            mCustomResSwitch.setChecked(enabled);
+            mWidthPref.setText(String.valueOf(AppKV.getCustomWidth(context)));
+            mHeightPref.setText(String.valueOf(AppKV.getCustomHeight(context)));
+            mDpiPref.setText(String.valueOf(AppKV.getCustomDpi(context)));
+            syncPresetSummary();
+
+            mCustomResSwitch.setOnPreferenceChangeListener((preference, newValue) -> {
+                boolean on = Boolean.TRUE.equals(newValue);
+                AppKV.setBooleanConfig(getActivity(), AppKV.CUSTOM_RESOLUTION_ENABLED, on);
+                Toast.makeText(getActivity(), R.string.settings_restart_required_note, Toast.LENGTH_LONG).show();
+                return true;
+            });
+
+            mWidthPref.setOnPreferenceChangeListener(this::onSizeChanged);
+            mHeightPref.setOnPreferenceChangeListener(this::onSizeChanged);
+            mDpiPref.setOnPreferenceChangeListener(this::onDpiChanged);
+
+            mPresetPref.setOnPreferenceChangeListener((preference, newValue) -> {
+                String preset = String.valueOf(newValue);
+                int w;
+                int h;
+                if ("480x854".equals(preset)) {
+                    w = 480; h = 854;
+                } else if ("720x1280".equals(preset)) {
+                    w = 720; h = 1280;
+                } else if ("1080x1920".equals(preset)) {
+                    w = 1080; h = 1920;
+                } else {
+                    w = AppKV.DEFAULT_CUSTOM_WIDTH;
+                    h = AppKV.DEFAULT_CUSTOM_HEIGHT;
+                }
+                AppKV.setIntConfig(getActivity(), AppKV.CUSTOM_RESOLUTION_WIDTH, w);
+                AppKV.setIntConfig(getActivity(), AppKV.CUSTOM_RESOLUTION_HEIGHT, h);
+                mWidthPref.setText(String.valueOf(w));
+                mHeightPref.setText(String.valueOf(h));
+                syncPresetSummary();
+                Toast.makeText(getActivity(), R.string.settings_restart_required_note, Toast.LENGTH_LONG).show();
+                return true;
+            });
+
+            Preference restoreDefaults = findPreference(getString(R.string.settings_key_restore_defaults));
+            if (restoreDefaults != null) {
+                restoreDefaults.setOnPreferenceClickListener(preference -> {
+                    AppKV.restoreDisplayDefaults(getActivity());
+                    mCustomResSwitch.setChecked(false);
+                    mWidthPref.setText(String.valueOf(AppKV.DEFAULT_CUSTOM_WIDTH));
+                    mHeightPref.setText(String.valueOf(AppKV.DEFAULT_CUSTOM_HEIGHT));
+                    mDpiPref.setText(String.valueOf(AppKV.DEFAULT_CUSTOM_DPI));
+                    syncPresetSummary();
+                    Toast.makeText(getActivity(), R.string.settings_restart_required_note, Toast.LENGTH_LONG).show();
+                    return true;
+                });
+            }
+        }
+
+        private boolean onSizeChanged(Preference preference, Object newValue) {
+            int value;
+            try {
+                value = Integer.parseInt(String.valueOf(newValue).trim());
+            } catch (NumberFormatException e) {
+                value = -1;
+            }
+            int otherW = preference == mWidthPref ? value : safeParse(mWidthPref.getText(), -1);
+            int otherH = preference == mHeightPref ? value : safeParse(mHeightPref.getText(), -1);
+            if (!AppKV.isValidSize(otherW, otherH)) {
+                Toast.makeText(getActivity(), getString(R.string.settings_invalid_size,
+                        AppKV.MIN_DIMENSION, AppKV.MAX_DIMENSION), Toast.LENGTH_LONG).show();
+                return false;
+            }
+            AppKV.setIntConfig(getActivity(),
+                    preference == mWidthPref ? AppKV.CUSTOM_RESOLUTION_WIDTH : AppKV.CUSTOM_RESOLUTION_HEIGHT,
+                    value);
+            syncPresetSummary();
+            Toast.makeText(getActivity(), R.string.settings_restart_required_note, Toast.LENGTH_LONG).show();
+            return true;
+        }
+
+        private boolean onDpiChanged(Preference preference, Object newValue) {
+            int value;
+            try {
+                value = Integer.parseInt(String.valueOf(newValue).trim());
+            } catch (NumberFormatException e) {
+                value = -1;
+            }
+            if (!AppKV.isValidDpi(value)) {
+                Toast.makeText(getActivity(), getString(R.string.settings_invalid_dpi,
+                        AppKV.MIN_DPI, AppKV.MAX_DPI), Toast.LENGTH_LONG).show();
+                return false;
+            }
+            AppKV.setIntConfig(getActivity(), AppKV.CUSTOM_DPI, value);
+            Toast.makeText(getActivity(), R.string.settings_restart_required_note, Toast.LENGTH_LONG).show();
+            return true;
+        }
+
+        private static int safeParse(String s, int fallback) {
+            try {
+                return Integer.parseInt(s.trim());
+            } catch (Throwable e) {
+                return fallback;
+            }
+        }
+
+        private void syncPresetSummary() {
+            if (mPresetPref == null) {
+                return;
+            }
+            String current = AppKV.getCustomWidth(getActivity()) + "x" + AppKV.getCustomHeight(getActivity());
+            String resolved = null;
+            for (CharSequence entry : mPresetPref.getEntries()) {
+                String e = String.valueOf(entry);
+                if (e.contains(current)) {
+                    resolved = e;
+                    break;
+                }
+            }
+            if (resolved == null) {
+                resolved = mPresetPref.getEntries()[0].toString();
+            }
+            mPresetPref.setValue(resolved);
+            mPresetPref.setSummary(resolved);
         }
 
 

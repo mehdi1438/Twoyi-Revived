@@ -78,7 +78,12 @@ public final class RomManager {
         Log.i(TAG, "timezone: " + timeZoneID);
         properties.setProperty("persist.sys.timezone", timeZoneID);
 
-        properties.setProperty("ro.sf.lcd_density", String.valueOf(DisplayMetrics.DENSITY_DEVICE_STABLE));
+        int lcdDensity = DisplayMetrics.DENSITY_DEVICE_STABLE;
+        if (AppKV.isCustomResolutionEnabled(context)) {
+            // Phase 3: guest-side density override (validated 120-640 in SettingsActivity).
+            lcdDensity = AppKV.getCustomDpi(context);
+        }
+        properties.setProperty("ro.sf.lcd_density", String.valueOf(lcdDensity));
 
         try (Writer writer = new FileWriter(propFile)) {
             properties.store(writer, null);
