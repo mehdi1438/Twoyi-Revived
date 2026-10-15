@@ -80,6 +80,13 @@ public class TwoyiStatusManager {
             return;
         }
 
+        // If the floating overlay owns the guest view, bring the overlay back instead of
+        // launching a second fullscreen surface onto the running renderer.
+        if (io.twoyi.floating.FloatingGuestService.isRunning()) {
+            io.twoyi.floating.FloatingGuestService.restore(context);
+            return;
+        }
+
         Intent intent;
         if (mShown.get()) {
             intent = new Intent(Intent.ACTION_MAIN);

@@ -57,6 +57,13 @@
     <string name="import_app_from_file">Import app from APK</string>
     <string name="unsupported_for_32bit_app">32 bit app is not supported :(</string>
     <string name="please_install_one_by_one">Please install app one by one!</string>
+    <string name="select_app_select_all">Select All</string>
+    <string name="select_app_selected_count">%1$d selected (tap to deselect all)</string>
+    <string name="select_app_max_count">You can select at most %1$d apps per import.</string>
+    <string name="import_result_summary">Imported: %1$d, Failed: %2$d</string>
+    <string name="import_cancelled">Import cancelled.</string>
+    <string name="import_not_enough_space">Not enough space in guest storage: need %1$s, only %2$s free.</string>
+    <string name="import_staging_failed">Guest storage is not available yet; start the guest first.</string>
     <string name="install_success">Install success!</string>
     <string name="install_failed">Install failed: %1$s</string>
     <string name="title_settings">Settings</string>
@@ -92,4 +99,17 @@
     <string name="settings_key_shutdown">Shutdown</string>
     <string name="settings_key_reboot">Reboot</string>
     <string name="replace_rom_unofficial_tips">Sorry, please edit the rom info and avoid using official author name :)</string>
+
+    <!-- Phase 2: floating guest window -->
+    <string name="floating_notification_title">Twoyi guest</string>
+    <string name="floating_notification_text">Android guest is running in a floating window</string>
+    <string name="floating_permission_required">To use the floating window, allow Twoyi to display over other apps in system settings.</string>
+    <string name="floating_not_started_yet">Wait until the guest has finished booting before switching to the floating window.</string>
+    <string name="floating_handoff_failed">Could not switch to the floating window; staying fullscreen.</string>
+    <string name="floating_booting">Starting the guest in the floating window…</string>
+    <string name="floating_btn_desc">Switch to floating window</string>
+    <string name="floating_close">Close</string>
+    <string name="floating_minimize">Minimize</string>
+    <string name="floating_open_fullscreen">Open fullscreen</string>
+    <string name="floating_resize">Resize</string>
 </resources>

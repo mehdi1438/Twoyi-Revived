@@ -90,4 +90,11 @@
     <string name="settings_key_shutdown">關機</string>
     <string name="settings_key_reboot">重啟</string>
     <string name="replace_rom_unofficial_tips">抱歉，請修改 ROM 描述資訊，並且儘量不要使用官方作者的名字 :)</string>
+    <string name="select_app_select_all">全選</string>
+    <string name="select_app_selected_count">已選擇 %1$d 個（點擊取消全選）</string>
+    <string name="select_app_max_count">每次匯入最多選擇 %1$d 個應用。</string>
+    <string name="import_result_summary">匯入成功：%1$d，失敗：%2$d</string>
+    <string name="import_cancelled">匯入已取消。</string>
+    <string name="import_not_enough_space">客戶機儲存空間不足：需要 %1$s，僅剩 %2$s。</string>
+    <string name="import_staging_failed">客戶機儲存暫不可用，請先啟動客戶機。</string>
 </resources>

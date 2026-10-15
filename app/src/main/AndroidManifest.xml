@@ -10,6 +10,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <application
         android:allowBackup="true"
@@ -51,6 +53,10 @@
             android:name=".ui.SettingsActivity"
             android:label="@string/title_settings"
             android:screenOrientation="portrait" />
+
+        <service
+            android:name=".floating.FloatingGuestService"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

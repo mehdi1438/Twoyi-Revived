@@ -50,4 +50,16 @@
 
     </RelativeLayout>
 
+    <!-- Phase 2: floating-window handoff button, shown once the guest has booted. -->
+    <ImageButton
+        android:id="@+id/floatBtn"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="12dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/floating_btn_desc"
+        android:src="@drawable/ic_floating_minimize"
+        android:visibility="gone" />
+
 </FrameLayout>

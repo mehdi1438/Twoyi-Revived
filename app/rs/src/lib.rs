@@ -108,6 +108,32 @@ pub fn renderer_init(
 }
 
 #[no_mangle]
+pub fn renderer_attach(
+    env: JNIEnv,
+    _clz: jclass,
+    surface: jobject,
+) {
+    debug!("renderer_attach");
+
+    // Only meaningful once the renderer/guest is running; before that this is a no-op and
+    // the normal renderer_init path will own the first real surface.
+    if RENDERER_STARTED.load(Ordering::Acquire) {
+        let window = unsafe { ndk_sys::ANativeWindow_fromSurface(env.get_native_interface(), surface) };
+        if window.is_null() {
+            error!("renderer_attach: ANativeWindow_fromSurface was null!");
+            return;
+        }
+        let win = window as *mut c_void;
+        let width = unsafe { ndk_sys::ANativeWindow_getWidth(win) };
+        let height = unsafe { ndk_sys::ANativeWindow_getHeight(win) };
+        unsafe {
+            renderer_bindings::setNativeWindow(win);
+            renderer_bindings::resetSubWindow(win, 0, 0, width, height, width, height, 1.0, 0.0);
+        }
+    }
+}
+
+#[no_mangle]
 pub fn renderer_reset_window(
     env: JNIEnv,
     _clz: jclass,
@@ -128,8 +154,18 @@ pub fn renderer_reset_window(
 pub fn renderer_remove_window(env: JNIEnv, _clz: jclass, surface: jobject) {
     debug!("renderer_remove_window");
 
+    // The Java side guards this (GuestSurfaceView only calls removeWindow when it is not in a
+    // reparent handoff), but be defensive: removing the sub-window while no renderer/guest is
+    // running would pass a dangling native window into libOpenglRender.
+    if !RENDERER_STARTED.load(Ordering::Acquire) {
+        return;
+    }
+
     unsafe {
         let window = ndk_sys::ANativeWindow_fromSurface(env.get_native_interface(), surface);
+        if window.is_null() {
+            return;
+        }
         renderer_bindings::removeSubWindow(window as *mut c_void);
     }
 }
@@ -196,6 +232,7 @@ unsafe fn JNI_OnLoad(jvm: JavaVM, _reserved: *mut c_void) -> jint {
     let class_name: &str = "io/twoyi/Renderer";
     let jni_methods = [
         jni_method!(init, renderer_init, "(Landroid/view/Surface;Ljava/lang/String;FFI)V"),
+        jni_method!(attach, renderer_attach, "(Landroid/view/Surface;)V"),
         jni_method!(
             resetWindow,
             renderer_reset_window,
