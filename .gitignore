@@ -14,3 +14,12 @@
 .cxx
 local.properties
 dl.sh
+app/src/main/assets/rootfs.7z
+app/src/main/assets/rom.ini
+local.properties
+.gradle/
+build/
+app/build/
+.idea/
+*.apk
+*.patch

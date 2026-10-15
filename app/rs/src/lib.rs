@@ -123,9 +123,9 @@ pub fn renderer_attach(
             error!("renderer_attach: ANativeWindow_fromSurface was null!");
             return;
         }
+        let width = unsafe { ndk_sys::ANativeWindow_getWidth(window) };
+        let height = unsafe { ndk_sys::ANativeWindow_getHeight(window) };
         let win = window as *mut c_void;
-        let width = unsafe { ndk_sys::ANativeWindow_getWidth(win) };
-        let height = unsafe { ndk_sys::ANativeWindow_getHeight(win) };
         unsafe {
             renderer_bindings::setNativeWindow(win);
             renderer_bindings::resetSubWindow(win, 0, 0, width, height, width, height, 1.0, 0.0);

@@ -292,7 +292,7 @@ public class SelectAppActivity extends AppCompatActivity {
 
         // Free-space check: require the APK payload plus a safety margin for adb's
         // in-guest staging (it pushes to the device tmp before committing).
-        StatFs statFs = new StatFs(stagingRoot);
+        StatFs statFs = new StatFs(stagingRoot.getAbsolutePath());
         long available = statFs.getBlockSizeLong() * statFs.getAvailableBlocksLong();
         long required = totalBytes + Math.max(totalBytes / 4, 32L * 1024 * 1024);
         if (available < required) {

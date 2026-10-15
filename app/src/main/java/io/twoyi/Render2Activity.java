@@ -19,6 +19,7 @@
 package io.twoyi;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
@@ -45,6 +46,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.twoyi.floating.FloatingGuestService;
 import io.twoyi.floating.FloatingWindowManager;
+import io.twoyi.ui.GuestSurfaceView;
 import io.twoyi.utils.AppKV;
 import io.twoyi.utils.LogEvents;
 import io.twoyi.utils.NavUtils;
@@ -122,6 +124,7 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
 
         if (sGuestSurfaceView == null) {
             sGuestSurfaceView = new GuestSurfaceView(this);
+            sGuestSurfaceView.markForBoot();
         } else if (!TwoyiStatusManager.getInstance().isStarted()
                 && !sGuestSurfaceView.isSurfaceAlive()) {
             // Reused view from a previous session whose renderer is not up: this surface will
