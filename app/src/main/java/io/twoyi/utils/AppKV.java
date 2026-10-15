@@ -31,6 +31,64 @@ public class AppKV {
 
     // 是否应该使用第三方 ROM
     public static final String SHOULD_USE_THIRD_PARTY_ROM = "should_use_third_party_rom";
+
+    // Phase 3: custom guest resolution and DPI (off by default -> host-window behaviour)
+    public static final String CUSTOM_RESOLUTION_ENABLED = "custom_resolution_enabled";
+    public static final String CUSTOM_RESOLUTION_WIDTH = "custom_resolution_width";
+    public static final String CUSTOM_RESOLUTION_HEIGHT = "custom_resolution_height";
+    public static final String CUSTOM_DPI = "custom_dpi";
+
+    public static final int DEFAULT_CUSTOM_WIDTH = 720;
+    public static final int DEFAULT_CUSTOM_HEIGHT = 1280;
+    public static final int DEFAULT_CUSTOM_DPI = 320;
+
+    public static final int MIN_DPI = 120;
+    public static final int MAX_DPI = 640;
+    public static final int MIN_DIMENSION = 120;
+    public static final int MAX_DIMENSION = 4096;
+
+    /** True when a valid custom width/height/DPI triple is stored and the switch is on. */
+    public static boolean isCustomResolutionEnabled(Context context) {
+        if (!getBooleanConfig(context, CUSTOM_RESOLUTION_ENABLED, false)) {
+            return false;
+        }
+        int w = getIntConfig(context, CUSTOM_RESOLUTION_WIDTH, 0);
+        int h = getIntConfig(context, CUSTOM_RESOLUTION_HEIGHT, 0);
+        int dpi = getIntConfig(context, CUSTOM_DPI, 0);
+        return isValidSize(w, h) && isValidDpi(dpi);
+    }
+
+    public static boolean isValidSize(int width, int height) {
+        return width >= MIN_DIMENSION && width <= MAX_DIMENSION
+                && height >= MIN_DIMENSION && height <= MAX_DIMENSION;
+    }
+
+    public static boolean isValidDpi(int dpi) {
+        return dpi >= MIN_DPI && dpi <= MAX_DPI;
+    }
+
+    public static int getCustomWidth(Context context) {
+        return getIntConfig(context, CUSTOM_RESOLUTION_WIDTH, DEFAULT_CUSTOM_WIDTH);
+    }
+
+    public static int getCustomHeight(Context context) {
+        return getIntConfig(context, CUSTOM_RESOLUTION_HEIGHT, DEFAULT_CUSTOM_HEIGHT);
+    }
+
+    public static int getCustomDpi(Context context) {
+        return getIntConfig(context, CUSTOM_DPI, DEFAULT_CUSTOM_DPI);
+    }
+
+    @SuppressLint("ApplySharedPref")
+    public static void restoreDisplayDefaults(Context context) {
+        getPref(context).edit()
+                .putBoolean(CUSTOM_RESOLUTION_ENABLED, false)
+                .putInt(CUSTOM_RESOLUTION_WIDTH, DEFAULT_CUSTOM_WIDTH)
+                .putInt(CUSTOM_RESOLUTION_HEIGHT, DEFAULT_CUSTOM_HEIGHT)
+                .putInt(CUSTOM_DPI, DEFAULT_CUSTOM_DPI)
+                .commit();
+    }
+
     public static boolean getBooleanConfig(Context context,  String key, boolean fallback) {
         return getPref(context).getBoolean(key, fallback);
     }
@@ -38,6 +96,15 @@ public class AppKV {
     @SuppressLint("ApplySharedPref")
     public static void setBooleanConfig(Context context, String key, boolean value) {
         getPref(context).edit().putBoolean(key, value).commit();
+    }
+
+    public static int getIntConfig(Context context, String key, int fallback) {
+        return getPref(context).getInt(key, fallback);
+    }
+
+    @SuppressLint("ApplySharedPref")
+    public static void setIntConfig(Context context, String key, int value) {
+        getPref(context).edit().putInt(key, value).commit();
     }
 
     private static SharedPreferences getPref(Context context) {
