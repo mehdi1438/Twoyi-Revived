@@ -33,6 +33,14 @@ public class Renderer {
 
     public static native void init(Surface surface, String loader, float xdpi, float ydpi, int fps);
 
+    /**
+     * Re-attach an existing renderer to a new surface without booting anything. Used when the
+     * guest view is handed off between {@link io.twoyi.Render2Activity} and the floating overlay.
+     * Safe no-op if the renderer/guest was never started; otherwise identical to the already-started
+     * branch of {@link #init} (setNativeWindow + resetSubWindow).
+     */
+    public static native void attach(Surface surface);
+
     public static native void resetWindow(Surface surface, int top, int left, int width, int height);
 
     public static native void removeWindow(Surface surface);

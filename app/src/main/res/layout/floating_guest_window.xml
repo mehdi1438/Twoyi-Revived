@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ~ This Source Code Form is subject to the terms of the Mozilla Public
+  ~ License, v. 2.0. If a copy of the MPL was not distributed with this
+  ~ file, You can obtain one at https://mozilla.org/MPL/2.0/.
+  -->
+
+<!-- Floating guest window chrome. The root is added by FloatingGuestService with
+     TYPE_APPLICATION_OVERLAY; drag by the title bar, resize via the bottom-right handle. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#E0000000"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/floating_chrome"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#CC222222"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingLeft="8dp"
+        android:paddingRight="4dp">
+
+        <TextView
+            android:id="@+id/floating_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            android:textColor="@color/white"
+            android:textSize="13sp" />
+
+        <ImageButton
+            android:id="@+id/floating_minimize"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/floating_minimize"
+            android:src="@drawable/ic_floating_minimize" />
+
+        <ImageButton
+            android:id="@+id/floating_fullscreen"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/floating_open_fullscreen"
+            android:src="@drawable/ic_floating_fullscreen" />
+
+        <ImageButton
+            android:id="@+id/floating_close"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/floating_close"
+            android:src="@drawable/ic_floating_close" />
+    </LinearLayout>
+
+    <FrameLayout
+        android:id="@+id/floating_guest_container"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@android:color/black" />
+
+    <!-- Resize affordance in the corner (the whole view is the touch target). -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <View
+            android:id="@+id/floating_resize_handle"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_gravity="bottom|end"
+            android:background="@drawable/bg_floating_resize_handle"
+            android:contentDescription="@string/floating_resize" />
+    </FrameLayout>
+
+</LinearLayout>

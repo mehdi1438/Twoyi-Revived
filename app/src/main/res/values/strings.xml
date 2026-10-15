@@ -99,4 +99,17 @@
     <string name="settings_key_shutdown">Shutdown</string>
     <string name="settings_key_reboot">Reboot</string>
     <string name="replace_rom_unofficial_tips">Sorry, please edit the rom info and avoid using official author name :)</string>
+
+    <!-- Phase 2: floating guest window -->
+    <string name="floating_notification_title">Twoyi guest</string>
+    <string name="floating_notification_text">Android guest is running in a floating window</string>
+    <string name="floating_permission_required">To use the floating window, allow Twoyi to display over other apps in system settings.</string>
+    <string name="floating_not_started_yet">Wait until the guest has finished booting before switching to the floating window.</string>
+    <string name="floating_handoff_failed">Could not switch to the floating window; staying fullscreen.</string>
+    <string name="floating_booting">Starting the guest in the floating window…</string>
+    <string name="floating_btn_desc">Switch to floating window</string>
+    <string name="floating_close">Close</string>
+    <string name="floating_minimize">Minimize</string>
+    <string name="floating_open_fullscreen">Open fullscreen</string>
+    <string name="floating_resize">Resize</string>
 </resources>

@@ -36,12 +36,15 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
 import com.cleveroad.androidmanimation.LoadingAnimationView;
 
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import io.twoyi.floating.FloatingGuestService;
+import io.twoyi.floating.FloatingWindowManager;
 import io.twoyi.utils.AppKV;
 import io.twoyi.utils.LogEvents;
 import io.twoyi.utils.NavUtils;
@@ -55,51 +58,50 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
 
     private static final String TAG = "Render2Activity";
 
+    /** The shared guest surface; may be handed off to the floating overlay (Phase 2). */
+    public static GuestSurfaceView sGuestSurfaceView;
+
     private SurfaceView mSurfaceView;
 
+    private final AtomicBoolean mIsExtracting = new AtomicBoolean(false);
+
     private ViewGroup mRootView;
+    private View mFloatButton;
+    private static final int REQUEST_OVERLAY_PERMISSION = 0x2F01;
+    private boolean mPendingFloatSettings = false;
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_OVERLAY_PERMISSION) {
+            mPendingFloatSettings = false;
+            if (FloatingWindowManager.hasOverlayPermission(this)) {
+                goFloating();
+            } else {
+                // Graceful denial: keep running fullscreen, just tell the user why.
+                Toast.makeText(this, R.string.floating_permission_required, Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
     private LoadingAnimationView mLoadingView;
     private TextView mLoadingText;
     private View mLoadingLayout;
     private View mBootLogView;
 
-    private final AtomicBoolean mIsExtracting = new AtomicBoolean(false);
-
-    private final SurfaceHolder.Callback mSurfaceCallback = new SurfaceHolder.Callback() {
-        @Override
-        public void surfaceCreated(@NonNull SurfaceHolder holder) {
-            Surface surface = holder.getSurface();
-            WindowManager windowManager = getWindowManager();
-            Display defaultDisplay = windowManager.getDefaultDisplay();
-            DisplayMetrics displayMetrics = new DisplayMetrics();
-            defaultDisplay.getRealMetrics(displayMetrics);
-
-            float xdpi = displayMetrics.xdpi;
-            float ydpi = displayMetrics.ydpi;
-
-            Renderer.init(surface, RomManager.getLoaderPath(getApplicationContext()), xdpi, ydpi, (int) getBestFps());
-
-            Log.i(TAG, "surfaceCreated");
-        }
-
-        @Override
-        public void surfaceChanged(@NonNull SurfaceHolder holder, int format, int width, int height) {
-            Surface surface = holder.getSurface();
-            Renderer.resetWindow(surface, 0, 0, mSurfaceView.getWidth(), mSurfaceView.getHeight());
-            Log.i(TAG, "surfaceChanged: " + mSurfaceView.getWidth() + "x" + mSurfaceView.getHeight());
-        }
-
-        @Override
-        public void surfaceDestroyed(@NonNull SurfaceHolder holder) {
-            Renderer.removeWindow(holder.getSurface());
-            Log.i(TAG, "surfaceDestroyed!");
-        }
-    };
-
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         boolean started = TwoyiStatusManager.getInstance().isStarted();
         Log.i(TAG, "onCreate: " + savedInstanceState + " isStarted: " + started);
+
+        if (started && FloatingGuestService.isRunning()) {
+            // The floating overlay owns the guest surface right now. Don't create a second
+            // fullscreen surface onto the running renderer and don't reboot the guest --
+            // just bring the overlay back and finish.
+            FloatingGuestService.restore(this);
+            finish();
+            return;
+        }
 
         if (started) {
             // we have been started, but WTF we are onCreate again? just reboot ourself.
@@ -118,13 +120,23 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
         setContentView(R.layout.ac_render);
         mRootView = findViewById(R.id.root);
 
-        mSurfaceView = new SurfaceView(this);
-        mSurfaceView.getHolder().addCallback(mSurfaceCallback);
+        if (sGuestSurfaceView == null) {
+            sGuestSurfaceView = new GuestSurfaceView(this);
+        } else if (!TwoyiStatusManager.getInstance().isStarted()
+                && !sGuestSurfaceView.isSurfaceAlive()) {
+            // Reused view from a previous session whose renderer is not up: this surface will
+            // perform the cold boot when it is created.
+            sGuestSurfaceView.markForBoot();
+        }
+        mSurfaceView = sGuestSurfaceView;
 
         mLoadingLayout = findViewById(R.id.loadingLayout);
         mLoadingView = findViewById(R.id.loading);
         mLoadingText = findViewById(R.id.loadingText);
         mBootLogView = findViewById(R.id.bootlog);
+        mFloatButton = findViewById(R.id.floatBtn);
+        mFloatButton.setVisibility(View.GONE);
+        mFloatButton.setOnClickListener(v -> goFloating());
 
         mLoadingLayout.setVisibility(View.VISIBLE);
         mLoadingView.startAnimation();
@@ -135,10 +147,91 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
 
     }
 
+    /**
+     * Hand the guest surface over to the floating overlay service. Only proceeds when the
+     * handoff token was granted by the service (so surfaceDestroyed must NOT tear the
+     * renderer down); otherwise the activity keeps owning the surface.
+     */
+    public void goFloating() {
+        if (!TwoyiStatusManager.getInstance().isStarted()) {
+            Toast.makeText(this, R.string.floating_not_started_yet, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // Overlay-permission flow with graceful denial: ask once via the system settings
+        // screen; if the user still denies (or is on Android 12+ where full-screen app
+        // "display over other apps" is restricted), we simply keep rendering fullscreen.
+        if (!FloatingWindowManager.hasOverlayPermission(this)) {
+            mPendingFloatSettings = true;
+            try {
+                startActivityForResult(
+                        FloatingWindowManager.overlayPermissionIntent(this),
+                        REQUEST_OVERLAY_PERMISSION);
+            } catch (Throwable t) {
+                // No settings screen available on this device/ROM: stay fullscreen.
+                mPendingFloatSettings = false;
+                Toast.makeText(this, R.string.floating_permission_required, Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+
+        GuestSurfaceView view = sGuestSurfaceView;
+        if (view == null || !view.requestHandoff()) {
+            Toast.makeText(this, R.string.floating_handoff_failed, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // Offer the view first: the service's onStartCommand runs on this same main thread but
+        // only AFTER goFloating returns, so takePending() is guaranteed to see it.
+        FloatingWindowManager.offer(view);
+
+        if (!FloatingGuestService.startFloating(this)) {
+            // Permission denied or service refused: keep rendering fullscreen here.
+            view.endHandoff();
+            FloatingWindowManager.clearPending();
+            return;
+        }
+
+        // Await the detach on the next layout pass so the overlay window is created first;
+        // beginDetachHandoff suppresses removeWindow during the reparent.
+        mRootView.post(() -> {
+            if (sGuestSurfaceView == null) {
+                return;
+            }
+            sGuestSurfaceView.beginDetachHandoff();
+            mRootView.removeView(sGuestSurfaceView);
+            sGuestSurfaceView = null;
+            finish();
+        });
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (mFloatButton != null) {
+            mFloatButton.setVisibility(TwoyiStatusManager.getInstance().isStarted() ? View.VISIBLE : View.GONE);
+        }
+        // The overlay settings screen may have been closed via BACK instead of "allow":
+        // re-check the grant when we come back so a denied request settles gracefully.
+        if (mPendingFloatSettings && !FloatingWindowManager.hasOverlayPermission(this)) {
+            mPendingFloatSettings = false;
+            Toast.makeText(this, R.string.floating_permission_required, Toast.LENGTH_LONG).show();
+        }
+    }
+
     @Override
     protected void onRestoreInstanceState(@NonNull Bundle savedInstanceState) {
         super.onRestoreInstanceState(savedInstanceState);
         Log.i(TAG, "onRestoreInstanceState: " + savedInstanceState);
+
+        if (FloatingGuestService.isRunning() || sGuestSurfaceView != null) {
+            // In/for floating mode the overlay owns (or will re-attach) the surface; a rotation
+            // or recreation must NOT reboot the guest. Just make sure the view is parented back.
+            if (mRootView != null && sGuestSurfaceView != null && sGuestSurfaceView.getParent() == null) {
+                mRootView.addView(sGuestSurfaceView, 0);
+            }
+            return;
+        }
 
         // we don't support state restore, just reboot.
         finish();
@@ -227,8 +320,23 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
             runOnUiThread(() -> {
                 mLoadingView.stopAnimation();
                 mLoadingLayout.setVisibility(View.GONE);
+                if (mFloatButton != null) {
+                    mFloatButton.setVisibility(View.VISIBLE);
+                }
             });
         }, "waiting-boot").start();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // Fullscreen teardown only: if the floating overlay is not running, nobody else owns
+        // the guest surface anymore -- drop it so a later boot creates a fresh one. If the
+        // overlay IS running it already re-parented (and may be holding) this view, so leave
+        // the static reference to it alone.
+        if (!FloatingGuestService.isRunning()) {
+            sGuestSurfaceView = null;
+        }
     }
 
     @Override
