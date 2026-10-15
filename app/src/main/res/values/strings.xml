@@ -57,6 +57,13 @@
     <string name="import_app_from_file">Import app from APK</string>
     <string name="unsupported_for_32bit_app">32 bit app is not supported :(</string>
     <string name="please_install_one_by_one">Please install app one by one!</string>
+    <string name="select_app_select_all">Select All</string>
+    <string name="select_app_selected_count">%1$d selected (tap to deselect all)</string>
+    <string name="select_app_max_count">You can select at most %1$d apps per import.</string>
+    <string name="import_result_summary">Imported: %1$d, Failed: %2$d</string>
+    <string name="import_cancelled">Import cancelled.</string>
+    <string name="import_not_enough_space">Not enough space in guest storage: need %1$s, only %2$s free.</string>
+    <string name="import_staging_failed">Guest storage is not available yet; start the guest first.</string>
     <string name="install_success">Install success!</string>
     <string name="install_failed">Install failed: %1$s</string>
     <string name="title_settings">Settings</string>

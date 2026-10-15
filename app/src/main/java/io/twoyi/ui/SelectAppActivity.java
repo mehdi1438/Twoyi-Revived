@@ -20,6 +20,7 @@ import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.StatFs;
 import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.Log;
@@ -64,8 +65,10 @@ import io.twoyi.R;
 import io.twoyi.utils.AppKV;
 import io.twoyi.utils.CacheManager;
 import io.twoyi.utils.IOUtils;
+import io.twoyi.utils.InstallTask;
 import io.twoyi.utils.Installer;
 import io.twoyi.utils.LogEvents;
+import io.twoyi.utils.RomManager;
 import io.twoyi.utils.UIHelper;
 import io.twoyi.utils.image.GlideModule;
 
@@ -79,26 +82,40 @@ public class SelectAppActivity extends AppCompatActivity {
 
     private static final int REQUEST_GET_FILE = 1;
 
+    // Max apps that can be selected for one batch import (staging + adb install is slow,
+    // and the guest's /data partition needs to hold every APK twice during commit).
+    private static final int MAX_BATCH_SELECT_COUNT = 50;
+
     private static int TAG_KEY = R.id.create_app_list;
 
     private ListAppAdapter mAdapter;
     private final List<AppItem> mDisplayItems = new ArrayList<>();
     private final List<AppItem> mAllApps = new ArrayList<>();
-    private AppItem mSelectItem;
     private TextView mEmptyView;
+    private ListView mListView;
 
     private final Set<String> specifiedPackages = new HashSet<>();
+
+    // Batch import state (Phase 1: multi-select import into the guest)
+    private final AtomicBoolean mInstallCancelled = new AtomicBoolean(false);
+    private MaterialDialog mInstallProgressDialog;
+    private int mSelectedCount = 0;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_createapp);
 
-        ListView mListView = findViewById(R.id.create_app_list);
+        mListView = findViewById(R.id.create_app_list);
         mAdapter = new ListAppAdapter();
         mListView.setAdapter(mAdapter);
         mEmptyView = findViewById(R.id.empty_view);
         mListView.setEmptyView(mEmptyView);
+
+        TextView selectAllBtn = findViewById(R.id.select_all_btn);
+        if (selectAllBtn != null) {
+            selectAllBtn.setOnClickListener(v -> toggleSelectAll());
+        }
 
         FloatingActionButton mFloatButton = findViewById(R.id.create_app_from_external);
         mFloatButton.setColorNormalResId(R.color.colorPrimary);
@@ -169,36 +186,277 @@ public class SelectAppActivity extends AppCompatActivity {
         // UpdateUtil.checkForceUpdate(this);
     }
 
-    private void selectComplete(Set<AppItem> pkgs) {
-
-        if (pkgs.size() != 1) {
-
-            // TODO: support install mutilpe apps together
-            Toast.makeText(getApplicationContext(), R.string.please_install_one_by_one, Toast.LENGTH_SHORT).show();
+    private void toggleSelectAll() {
+        if (mDisplayItems.isEmpty()) {
             return;
         }
 
-        ProgressDialog progressDialog = UIHelper.getProgressDialog(this);
-        progressDialog.setCancelable(false);
-        progressDialog.show();
+        boolean allSelected = true;
+        for (AppItem item : mDisplayItems) {
+            if (!item.selected) {
+                allSelected = false;
+                break;
+            }
+        }
 
+        boolean target = !allSelected;
+        int limit = 0;
+        for (AppItem item : mDisplayItems) {
+            if (target && !item.selected) {
+                // Keep the previous per-app guardrail: only 64-bit APKs can be imported.
+                if (!UIHelper.isApk64(item.applicationInfo.sourceDir)) {
+                    continue;
+                }
+                if (limit >= MAX_BATCH_SELECT_COUNT) {
+                    Toast.makeText(getApplicationContext(),
+                            getResources().getString(R.string.select_app_max_count, MAX_BATCH_SELECT_COUNT),
+                            Toast.LENGTH_SHORT).show();
+                    break;
+                }
+                item.selected = true;
+                limit++;
+            } else if (!target) {
+                item.selected = false;
+            }
+        }
+
+        updateSelectionCount();
+        mAdapter.notifyDataSetChanged();
+    }
+
+    private void updateSelectionCount() {
+        int count = 0;
+        for (AppItem item : mAllApps) {
+            if (item.selected) {
+                count++;
+            }
+        }
+        mSelectedCount = count;
+
+        TextView selectAllBtn = findViewById(R.id.select_all_btn);
+        if (selectAllBtn != null) {
+            selectAllBtn.setText(count > 0
+                    ? getResources().getString(R.string.select_app_selected_count, count)
+                    : getString(R.string.select_app_select_all));
+        }
+    }
+
+    private void selectComplete(Set<AppItem> pkgs) {
+
+        if (pkgs.isEmpty()) {
+            Toast.makeText(this, R.string.select_app_tips, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        List<InstallTask> tasks = new ArrayList<>();
+        long totalBytes = 0;
         for (AppItem pkg : pkgs) {
             List<File> apks = new ArrayList<>();
             ApplicationInfo applicationInfo = pkg.applicationInfo;
 
             // main apk
             String sourceDir = applicationInfo.sourceDir;
-            apks.add(new File(sourceDir));
+            File baseApk = new File(sourceDir);
+            apks.add(baseApk);
+            totalBytes += baseApk.length();
 
             String[] splitSourceDirs = applicationInfo.splitSourceDirs;
             if (splitSourceDirs != null) {
                 for (String splitSourceDir : splitSourceDirs) {
-                    apks.add(new File(splitSourceDir));
+                    File splitApk = new File(splitSourceDir);
+                    apks.add(splitApk);
+                    totalBytes += splitApk.length();
                 }
             }
 
-            startInstall(apks, progressDialog, false);
+            String label = String.valueOf(pkg.name) + " (" + pkg.pkg + ")";
+            tasks.add(new InstallTask(apks, label));
         }
+
+        startBatchInstall(tasks, totalBytes);
+    }
+
+    /**
+     * Stage the selected APKs (base + splits) into a temp dir inside the guest-visible
+     * sdcard, then install them through Twoyi's real guest install mechanism (private
+     * adb server -> guest adbd). Staging is needed because the guest process cannot read
+     * the host app's private data dir where /data/app/*.apk normally lives.
+     */
+    private void startBatchInstall(List<InstallTask> tasks, long totalBytes) {
+
+        File stagingRoot = RomManager.getRomSdcardDir(getApplicationContext());
+        if (!stagingRoot.exists() || !stagingRoot.isDirectory()) {
+            Toast.makeText(getApplicationContext(), R.string.import_staging_failed, Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        // Free-space check: require the APK payload plus a safety margin for adb's
+        // in-guest staging (it pushes to the device tmp before committing).
+        StatFs statFs = new StatFs(stagingRoot);
+        long available = statFs.getBlockSizeLong() * statFs.getAvailableBlocksLong();
+        long required = totalBytes + Math.max(totalBytes / 4, 32L * 1024 * 1024);
+        if (available < required) {
+            Toast.makeText(getApplicationContext(),
+                    getResources().getString(R.string.import_not_enough_space,
+                            formatSize(required), formatSize(available)),
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        UIHelper.defer()
+                .when(() -> {
+                    File stageDir = new File(stagingRoot, ".twoyi_import_" + System.currentTimeMillis());
+                    //noinspection ResultOfMethodCallIgnored
+                    stageDir.mkdirs();
+                    // The guest mounts this tree; make staged files world-readable so
+                    // adbd (different uid inside the guest) can open them.
+                    //noinspection ResultOfMethodCallIgnored
+                    stageDir.setReadable(true, false);
+                    //noinspection ResultOfMethodCallIgnored
+                    stageDir.setExecutable(true, false);
+
+                    List<InstallTask> stagedTasks = new ArrayList<>();
+                    List<File> allStagedFiles = new ArrayList<>();
+                    try {
+                        for (InstallTask task : tasks) {
+                            List<File> staged = new ArrayList<>();
+                            for (File src : task.getFiles()) {
+                                if (mInstallCancelled.get()) {
+                                    throw new InterruptedException("cancelled");
+                                }
+                                File dst = new File(stageDir, sanitizeForFs(src.getName()));
+                                IOUtils.copyFile(src, dst);
+                                //noinspection ResultOfMethodCallIgnored
+                                dst.setReadable(true, false);
+                                staged.add(dst);
+                                allStagedFiles.add(dst);
+                            }
+                            stagedTasks.add(new InstallTask(staged, task.getLabel()));
+                        }
+                    } catch (Throwable e) {
+                        // Clean up partial staging on any failure/cancellation.
+                        IOUtils.deleteAll(allStagedFiles);
+                        //noinspection ResultOfMethodCallIgnored
+                        stageDir.delete();
+                        if (e instanceof RuntimeException) {
+                            throw (RuntimeException) e;
+                        }
+                        throw new RuntimeException(e.getMessage() == null ? e.toString() : e.getMessage(), e);
+                    }
+                    return stagedTasks;
+                })
+                .done(stagedTasks -> runOnUiThread(() -> {
+                    if (mInstallCancelled.get()) {
+                        finishBatch(null, true);
+                        return;
+                    }
+                    showInstallProgress(stagedTasks.size());
+                    Installer.installBatch(getApplicationContext(), stagedTasks, mInstallCancelled,
+                            new Installer.BatchInstallResult() {
+                                @Override
+                                public void onTaskStarted(int index, int total, String label) {
+                                    runOnUiThread(() -> {
+                                        if (mInstallProgressDialog != null && mInstallProgressDialog.isShowing()) {
+                                            mInstallProgressDialog.setMaxProgress(total);
+                                            mInstallProgressDialog.setProgress(index - 1);
+                                            mInstallProgressDialog.setContent(label);
+                                        }
+                                    });
+                                }
+
+                                @Override
+                                public void onTaskFinished(boolean success, String label, String msg) {
+                                    runOnUiThread(() -> {
+                                        if (mInstallProgressDialog != null && mInstallProgressDialog.isShowing()) {
+                                            mInstallProgressDialog.incrementProgress(1);
+                                        }
+                                        if (!success) {
+                                            failedLabels.add(label + ": " + msg);
+                                        } else {
+                                            successCount[0]++;
+                                        }
+                                    });
+                                }
+
+                                @Override
+                                public void onConnectionFailed(int taskCount) {
+                                    runOnUiThread(() -> finishBatch("Adb connect failed! Is the guest running?", false));
+                                }
+                            });
+                }))
+                .fail(err -> runOnUiThread(() -> {
+                    if (err instanceof InterruptedException || mInstallCancelled.get()) {
+                        finishBatch(null, true);
+                    } else {
+                        finishBatch(err.getMessage() == null ? err.toString() : err.getMessage(), false);
+                    }
+                }));
+    }
+
+    private final List<String> failedLabels = Collections.synchronizedList(new ArrayList<>());
+    private final int[] successCount = new int[1];
+
+    private void showInstallProgress(int total) {
+        dismissInstallDialog();
+        mInstallProgressDialog = UIHelper.getNumberProgressDialog(this);
+        mInstallProgressDialog.setMaxProgress(Math.max(total, 1));
+        mInstallProgressDialog.setOnCancelListener(dialog -> {
+            Log.i(TAG, "batch import cancelled by user");
+            mInstallCancelled.set(true);
+            finishBatch(null, true);
+        });
+        UIHelper.show(mInstallProgressDialog);
+    }
+
+    private void finishBatch(String fatalMsg, boolean cancelled) {
+        dismissInstallDialog();
+
+        List<String> failures = new ArrayList<>(failedLabels);
+        int succeeded = successCount[0];
+
+        StringBuilder sb = new StringBuilder();
+        if (fatalMsg != null) {
+            sb.append(fatalMsg).append('\n');
+        }
+        if (cancelled) {
+            sb.append(getString(R.string.import_cancelled)).append('\n');
+        }
+        sb.append(getResources().getString(R.string.import_result_summary, succeeded, failures.size()));
+        for (String f : failures) {
+            sb.append('\n').append(f);
+        }
+
+        failedLabels.clear();
+        successCount[0] = 0;
+        mInstallCancelled.set(false);
+
+        Toast.makeText(getApplicationContext(), sb.toString(), Toast.LENGTH_LONG).show();
+
+        if (fatalMsg == null && !cancelled && succeeded > 0) {
+            finish();
+        }
+    }
+
+    private void dismissInstallDialog() {
+        if (mInstallProgressDialog != null) {
+            UIHelper.dismiss(mInstallProgressDialog);
+            mInstallProgressDialog = null;
+        }
+    }
+
+    private static String sanitizeForFs(String name) {
+        // APK names from sourceDir are simple (<pkg>.apk / split_*.apk) but be defensive.
+        return name.replaceAll("[^A-Za-z0-9._\\-]", "_");
+    }
+
+    private static String formatSize(long bytes) {
+        if (bytes >= 1024L * 1024L * 1024L) {
+            return String.format(Locale.US, "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+        }
+        if (bytes >= 1024L * 1024L) {
+            return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
+        }
+        return String.format(Locale.US, "%.0f KB", bytes / 1024.0);
     }
 
     @Override
@@ -415,6 +673,14 @@ public class SelectAppActivity extends AppCompatActivity {
         });
     }
 
+    @Override
+    protected void onDestroy() {
+        // Abort any in-flight batch import and drop the dialog to avoid window leaks.
+        mInstallCancelled.set(true);
+        dismissInstallDialog();
+        super.onDestroy();
+    }
+
     private void loadAsync() {
 
         mEmptyView.setText(null);
@@ -507,6 +773,7 @@ public class SelectAppActivity extends AppCompatActivity {
             mDisplayItems.clear();
             mDisplayItems.addAll(v);
             notifyDataSetChangedWithSort();
+            updateSelectionCount();
 
             if (specified && !specifiedFound.get()) {
                 // 如果是跳转过来的，但是没有对应的包名对应，那么提示用户。
@@ -599,9 +866,9 @@ public class SelectAppActivity extends AppCompatActivity {
             }
             int position = (int) tag;
 
-            mSelectItem = mDisplayItems.get(position);
+            AppItem item = mDisplayItems.get(position);
 
-            boolean is64Bit = UIHelper.isApk64(mSelectItem.applicationInfo.sourceDir);
+            boolean is64Bit = UIHelper.isApk64(item.applicationInfo.sourceDir);
 
             if (!is64Bit) {
 
@@ -609,11 +876,18 @@ public class SelectAppActivity extends AppCompatActivity {
                 return;
             }
 
-            for (int i = 0; i < mDisplayItems.size(); i++) {
-                mDisplayItems.get(i).selected = position == i;
+            // Multi-select: toggle the tapped item, keep other selections (Phase 1).
+            if (!item.selected && mSelectedCount >= MAX_BATCH_SELECT_COUNT) {
+                Toast.makeText(getApplicationContext(),
+                        getResources().getString(R.string.select_app_max_count, MAX_BATCH_SELECT_COUNT),
+                        Toast.LENGTH_SHORT).show();
+                return;
             }
 
-            notifyDataSetChanged();
+            item.selected = !item.selected;
+
+            updateSelectionCount();
+            notifyDataSetChangedWithSort();
         }
     }
 
