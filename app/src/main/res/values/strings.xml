@@ -112,4 +112,94 @@
     <string name="floating_minimize">Minimize</string>
     <string name="floating_open_fullscreen">Open fullscreen</string>
     <string name="floating_resize">Resize</string>
+
+    <!-- Phase 3: custom resolution and DPI -->
+    <string name="settings_custom_width_key">custom_resolution_width</string>
+    <string name="settings_custom_height_key">custom_resolution_height</string>
+    <string name="settings_custom_dpi_key">custom_dpi</string>
+    <string name="settings_custom_preset_key">custom_resolution_preset</string>
+    <string name="settings_key_restore_defaults">restore_display_defaults</string>
+    <string name="settings_key_restart_note">display_restart_note</string>
+    <string name="settings_category_display">Display</string>
+    <string name="settings_custom_resolution_title">Custom resolution</string>
+    <string name="settings_custom_resolution_summary">Render the guest at a fixed size instead of the host window size. Off by default.</string>
+    <string name="settings_key_custom_resolution">custom_resolution_switch</string>
+    <string name="settings_display_width_title">Width (px)</string>
+    <string name="settings_display_height_title">Height (px)</string>
+    <string name="settings_dpi_title">Density (DPI)</string>
+    <string name="settings_display_preset_title">Preset</string>
+    <string-array name="display_presets">
+        <item>Default (720x1280 @ 320 DPI)</item>
+        <item>480x854</item>
+        <item>720x1280</item>
+        <item>1080x1920</item>
+    </string-array>
+    <string name="settings_restore_defaults_title">Restore defaults</string>
+    <string name="settings_restore_defaults_summary">Reset width, height and DPI to defaults and disable custom resolution</string>
+    <string name="settings_restart_required_note">A restart of Twoyi (reboot or kill and reopen) is required for display changes to take effect.</string>
+    <string name="settings_invalid_size">Invalid size: width and height must be between %1$d and %2$d pixels.</string>
+    <string name="settings_invalid_dpi">Invalid DPI: must be between %1$d and %2$d.</string>
+    <string name="settings_display_saved">Display settings saved.</string>
+
+    <!-- FPS cap setting -->
+    <string name="settings_key_fps_cap">fps_cap</string>
+    <string name="settings_fps_title">Frame rate cap</string>
+    <string name="settings_fps_summary">Requested guest frame rate. Applies on next boot/reboot of the guest.</string>
+    <string name="settings_fps_default">45</string>
+    <string-array name="fps_choices">
+        <item>30 fps</item>
+        <item>45 fps (default)</item>
+        <item>60 fps</item>
+        <item>90 fps</item>
+        <item>120 fps</item>
+    </string-array>
+    <string-array name="fps_values">
+        <item>30</item>
+        <item>45</item>
+        <item>60</item>
+        <item>90</item>
+        <item>120</item>
+    </string-array>
+    <!-- ROM Manager Strings -->
+    <string name="title_rom_manager" translatable="false">ROM Manager</string>
+    <string name="btn_add_rom" translatable="false">Add ROM</string>
+    <string name="btn_run" translatable="false">Run</string>
+    <string name="btn_backup" translatable="false">Backup</string>
+    <string name="btn_restore" translatable="false">Restore</string>
+    <string name="btn_delete" translatable="false">Delete</string>
+    <string name="active_profile" translatable="false">ACTIVE</string>
+    <string name="label_source" translatable="false">Source: %1$s</string>
+    <string name="label_size" translatable="false">Size: %1$s</string>
+    <string name="label_last_run" translatable="false">Last Run: %1$s</string>
+    <string name="label_root_status" translatable="false">Root: %1$s</string>
+    <string name="root_enabled" translatable="false">Enabled</string>
+    <string name="root_disabled" translatable="false">Disabled</string>
+    <string name="confirm_delete_title" translatable="false">Delete Profile</string>
+    <string name="confirm_delete_msg" translatable="false">Are you sure you want to delete profile \"%1$s\"? All data in this profile will be permanently deleted.</string>
+
+    <string name="btn_menu" translatable="false">ROM Manager</string>
+    <string name="settings_key_gpu_accel" translatable="false">GPU Acceleration</string>
+    <string name="settings_gpu_accel_summary" translatable="false">Enable hardware GPU acceleration for guest rendering</string>
+    <string name="settings_key_vulkan" translatable="false">Vulkan Support</string>
+    <string name="settings_vulkan_summary" translatable="false">Enable Vulkan API rendering backend</string>
+
+    <!-- Home screen -->
+    <string name="home_title" translatable="false">Twoyi</string>
+    <string name="home_status_active" translatable="false">Active</string>
+    <string name="home_status_stored" translatable="false">Stored</string>
+    <string name="home_no_preview" translatable="false">No preview</string>
+    <string name="home_meta_default" translatable="false">default</string>
+    <string name="home_meta_resolution" translatable="false">%1$d x %2$d - %3$d fps</string>
+    <string name="home_menu_rename" translatable="false">Rename</string>
+    <string name="home_menu_backup" translatable="false">Backup</string>
+    <string name="home_menu_delete" translatable="false">Delete</string>
+    <string name="home_btn_run" translatable="false">Run</string>
+    <string name="home_preview_desc" translatable="false">ROM preview</string>
+    <string name="home_overflow_desc" translatable="false">More options</string>
+    <string name="home_guest_running_refuse" translatable="false">A guest is running. Stop it first.</string>
+    <string name="home_activate_failed" translatable="false">Failed to activate this ROM.</string>
+    <string name="home_no_rootfs" translatable="false">This profile has no installed ROM yet.</string>
+    <string name="home_add_todo" translatable="false">Add ROM arrives in a later step.</string>
+    <string name="home_backup_todo" translatable="false">Backup arrives in a later step.</string>
+    <string name="home_rename_hint" translatable="false">ROM name</string>
 </resources>

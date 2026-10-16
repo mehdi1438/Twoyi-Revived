@@ -10,7 +10,15 @@ use log::{error, info, Level, debug};
 use ndk_sys;
 use std::ffi::c_void;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+// Phase 3: guest display size set by renderer_init; used to scale touch coordinates when the
+// custom-resolution switch is on and the host surface differs from the guest framebuffer.
+static GUEST_WIDTH: AtomicI32 = AtomicI32::new(0);
+static GUEST_HEIGHT: AtomicI32 = AtomicI32::new(0);
+// Size of the currently attached host surface/view, updated on init/attach/resetWindow.
+pub static VIEW_WIDTH: AtomicI32 = AtomicI32::new(0);
+pub static VIEW_HEIGHT: AtomicI32 = AtomicI32::new(0);
 use std::thread;
 
 use android_logger::Config;
@@ -46,6 +54,9 @@ pub fn renderer_init(
     xdpi: jfloat,
     ydpi: jfloat,
     fps: jint,
+    width: jint,
+    height: jint,
+    dpi: jint,
 ) {
     debug!("renderer_init");
     let window = unsafe { ndk_sys::ANativeWindow_fromSurface(env.get_native_interface(), surface) };
@@ -60,12 +71,26 @@ pub fn renderer_init(
 
     let window = unsafe { ndk::native_window::NativeWindow::from_ptr(window) };
 
-    let width = window.width();
-    let height = window.height();
+    // Phase 3: custom resolution. width/height/dpi come from the Java settings layer and are
+    // 0 when the custom-resolution switch is off, which keeps the old host-window behaviour
+    // exactly (guest size = host surface size, DPI = host xdpi/ydpi).
+    let host_width = window.width();
+    let host_height = window.height();
+
+    let guest_width = if width > 0 { width } else { host_width };
+    let guest_height = if height > 0 { height } else { host_height };
+
+    let guest_xdpi = if dpi > 0 { dpi } else { xdpi as i32 };
+    let guest_ydpi = if dpi > 0 { dpi } else { ydpi as i32 };
+
+    VIEW_WIDTH.store(host_width, Ordering::Release);
+    VIEW_HEIGHT.store(host_height, Ordering::Release);
+    GUEST_WIDTH.store(guest_width, Ordering::Release);
+    GUEST_HEIGHT.store(guest_height, Ordering::Release);
 
     info!(
-        "renderer_init width: {}, height: {}, fps: {}",
-        width, height, fps
+        "renderer_init guest {}x{}@{}, host {}x{}, fps: {}",
+        guest_width, guest_height, dpi.max(guest_xdpi), host_width, host_height, fps
     );
 
     if RENDERER_STARTED.compare_exchange(false, true, 
@@ -73,10 +98,12 @@ pub fn renderer_init(
         let win = window.ptr().as_ptr() as *mut c_void;
         unsafe {
             renderer_bindings::setNativeWindow(win);
-            renderer_bindings::resetSubWindow(win, 0, 0, width, height, width, height, 1.0, 0.0);
+            renderer_bindings::resetSubWindow(
+                win, 0, 0, guest_width, guest_height, guest_width, guest_height, 1.0, 0.0,
+            );
         }
     } else {
-        input::start_input_system(width, height);
+        input::start_input_system(guest_width, guest_height);
 
         thread::spawn(move || {
             let win = window.ptr().as_ptr() as *mut c_void;
@@ -84,10 +111,10 @@ pub fn renderer_init(
             unsafe {
                 renderer_bindings::startOpenGLRenderer(
                     win,
-                    width,
-                    height,
-                    xdpi as i32,
-                    ydpi as i32,
+                    guest_width,
+                    guest_height,
+                    guest_xdpi,
+                    guest_ydpi,
                     fps as i32,
                 );
             }
@@ -126,9 +153,16 @@ pub fn renderer_attach(
         let width = unsafe { ndk_sys::ANativeWindow_getWidth(window) };
         let height = unsafe { ndk_sys::ANativeWindow_getHeight(window) };
         let win = window as *mut c_void;
+        // Phase 3: when a custom resolution is active, keep the guest framebuffer size
+        // (set by renderer_init) instead of following the new surface's host size.
+        let gw = GUEST_WIDTH.load(Ordering::Acquire);
+        let gh = GUEST_HEIGHT.load(Ordering::Acquire);
+        let (sw, sh) = if gw > 0 && gh > 0 { (gw, gh) } else { (width, height) };
+        VIEW_WIDTH.store(width, Ordering::Release);
+        VIEW_HEIGHT.store(height, Ordering::Release);
         unsafe {
             renderer_bindings::setNativeWindow(win);
-            renderer_bindings::resetSubWindow(win, 0, 0, width, height, width, height, 1.0, 0.0);
+            renderer_bindings::resetSubWindow(win, 0, 0, sw, sh, sw, sh, 1.0, 0.0);
         }
     }
 }
@@ -146,7 +180,27 @@ pub fn renderer_reset_window(
     debug!("reset_window");
     unsafe {
         let window = ndk_sys::ANativeWindow_fromSurface(env.get_native_interface(), surface);
-        renderer_bindings::resetSubWindow(window as *mut c_void, 0, 0, _width, _height, _width, _height, 1.0, 0.0);
+        // Track the real view size so touch scaling stays correct for this surface.
+        let vw = ndk_sys::ANativeWindow_getWidth(window);
+        let vh = ndk_sys::ANativeWindow_getHeight(window);
+        if vw > 0 {
+            VIEW_WIDTH.store(vw, Ordering::Release);
+        }
+        if vh > 0 {
+            VIEW_HEIGHT.store(vh, Ordering::Release);
+        }
+        // Phase 3: with a custom resolution active the sub-window keeps the guest
+        // framebuffer size; otherwise follow the Java-supplied view size (old behavior).
+        let gw = GUEST_WIDTH.load(Ordering::Acquire);
+        let gh = GUEST_HEIGHT.load(Ordering::Acquire);
+        let vw = if vw > 0 { vw } else { _width };
+        let vh = if vh > 0 { vh } else { _height };
+        let (sw, sh) = if gw > 0 && gh > 0 && (gw != vw || gh != vh) {
+            (gw, gh)
+        } else {
+            (_width, _height)
+        };
+        renderer_bindings::resetSubWindow(window as *mut c_void, 0, 0, sw, sh, sw, sh, 1.0, 0.0);
     }
 }
 
@@ -182,8 +236,45 @@ pub fn handle_touch(env: JNIEnv, _clz: jclass, event: jobject) {
                 .unwrap();
             ndk::event::MotionEvent::from_ptr(nonptr)
         };
-        input::handle_touch(ev)
+                // Phase 3: when a custom resolution is active the guest framebuffer differs from the
+        // attached view/surface size; map pointer coordinates into guest space before sending.
+        let gw = GUEST_WIDTH.load(Ordering::Acquire);
+        let gh = GUEST_HEIGHT.load(Ordering::Acquire);
+        let vw = VIEW_WIDTH.load(Ordering::Acquire);
+        let vh = VIEW_HEIGHT.load(Ordering::Acquire);
+        if gw > 0 && gh > 0 && vw > 0 && vh > 0 && (gw != vw || gh != vh) {
+            let pts = rescale_motion_event(&ev, gw, gh, vw, vh);
+            input::handle_touch_scaled(&ev, &pts);
+        } else {
+            input::handle_touch(ev)
+        }
     }
+}
+
+/// Builds guest-space pointer samples using the shared input::TouchPt type.
+fn rescale_motion_event(
+    ev: &ndk::event::MotionEvent,
+    gw: i32,
+    gh: i32,
+    vw: i32,
+    vh: i32,
+) -> Vec<input::TouchPt> {
+    let sx = gw as f32 / vw as f32;
+    let sy = gh as f32 / vh as f32;
+
+    let raw = ev.ptr().as_ptr() as *const ndk_sys::AInputEvent;
+    let pointer_count = unsafe { ndk_sys::AMotionEvent_getPointerCount(raw) };
+
+    let mut pts = Vec::with_capacity(pointer_count);
+    let mut i: usize = 0;
+    while i < pointer_count {
+        let x = unsafe { ndk_sys::AMotionEvent_getX(raw, i) } * sx;
+        let y = unsafe { ndk_sys::AMotionEvent_getY(raw, i) } * sy;
+        let id = unsafe { ndk_sys::AMotionEvent_getPointerId(raw, i) };
+        pts.push(input::TouchPt { id, x, y });
+        i += 1;
+    }
+    pts
 }
 
 pub fn send_key_code(_env: JNIEnv, _clz: jclass, keycode: jint) {
@@ -231,7 +322,11 @@ unsafe fn JNI_OnLoad(jvm: JavaVM, _reserved: *mut c_void) -> jint {
 
     let class_name: &str = "io/twoyi/Renderer";
     let jni_methods = [
-        jni_method!(init, renderer_init, "(Landroid/view/Surface;Ljava/lang/String;FFI)V"),
+        jni_method!(
+            init,
+            renderer_init,
+            "(Landroid/view/Surface;Ljava/lang/String;FFIIII)V"
+        ),
         jni_method!(attach, renderer_attach, "(Landroid/view/Surface;)V"),
         jni_method!(
             resetWindow,

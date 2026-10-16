@@ -195,6 +195,122 @@ pub fn handle_touch(ev: MotionEvent) {
     }
 }
 
+/// View-space/guest-space pointer sample. Single shared type used by both lib.rs
+/// (rescale_motion_event builds it) and input.rs (handle_touch_scaled consumes it).
+/// Built only with getters that definitely exist in the vendored ndk-sys 0.3.0 bindings
+/// (AMotionEvent_getPointerCount, AMotionEvent_getX, AMotionEvent_getY, AMotionEvent_getPointerId).
+pub struct TouchPt {
+    pub id: i32,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Same as handle_touch, but the coordinates written into the guest uinput device come from
+/// `scaled` (guest space) instead of the raw event (view space). Used when a custom resolution
+/// is active and the attached surface size differs from the guest framebuffer size. The slot
+/// bookkeeping mirrors handle_touch exactly so both paths stay consistent.
+/// `scaled` uses input::TouchPt (single shared type; built by lib.rs::rescale_motion_event).
+pub fn handle_touch_scaled(ev: &MotionEvent, scaled: &[TouchPt]) {
+    let opt = INPUT_SENDER.lock().unwrap();
+    if let Some(ref fd) = *opt {
+        let action = ev.action();
+        let pointer_index = ev.pointer_index();
+        let pointer = ev.pointer_at_index(pointer_index);
+        let pointer_id = pointer.pointer_id();
+        let pressure = pointer.pressure();
+
+        // Locate the scaled sample matching the acting pointer id; fall back to index 0.
+        let pt = scaled
+            .iter()
+            .find(|p| p.id == pointer_id)
+            .or_else(|| scaled.get(pointer_index))
+            .or_else(|| scaled.first());
+
+        static G_INPUT_MT_SCALED: Lazy<Mutex<[i32; MAX_POINTERS]>> =
+            Lazy::new(|| std::sync::Mutex::new([0i32; MAX_POINTERS]));
+
+        match action {
+            MotionAction::Down | MotionAction::PointerDown => {
+                let (x, y) = match pt {
+                    Some(p) => (p.x, p.y),
+                    None => (pointer.x(), pointer.y()),
+                };
+
+                let mut mt = G_INPUT_MT_SCALED.lock().unwrap();
+                mt[pointer_id as usize] = 1;
+
+                let mut index = 0;
+                while index < MAX_POINTERS {
+                    if mt[index] != 0 {
+                        input_event_write(fd, EV_ABS, ABS_MT_SLOT, pointer_id);
+                        input_event_write(fd, EV_ABS, ABS_MT_TRACKING_ID, pointer_id + 1);
+
+                        if index == 0 {
+                            input_event_write(fd, EV_KEY, BTN_TOUCH, 108);
+                            input_event_write(fd, EV_KEY, BTN_TOOL_FINGER, 108);
+                        }
+
+                        input_event_write(fd, EV_ABS, ABS_MT_POSITION_X, x as i32);
+                        input_event_write(fd, EV_ABS, ABS_MT_POSITION_Y, y as i32);
+
+                        input_event_write(fd, EV_ABS, ABS_MT_PRESSURE, pressure as i32);
+
+                        input_event_write(fd, EV_SYN, SYN_REPORT, SYN_REPORT);
+                    }
+                    index = index + 1;
+                }
+            }
+            MotionAction::Up => {
+                let mut index = 0;
+                while index != MAX_POINTERS {
+                    let mut mt = G_INPUT_MT_SCALED.lock().unwrap();
+                    if mt[index] != 0 {
+                        mt[index] = 0;
+                        input_event_write(fd, EV_ABS, ABS_MT_SLOT, index.try_into().unwrap());
+                        input_event_write(fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+                        input_event_write(fd, EV_SYN, SYN_REPORT, SYN_REPORT);
+                    }
+                    index = index + 1;
+                }
+            }
+            MotionAction::Move => {
+                let (x, y) = match pt {
+                    Some(p) => (p.x, p.y),
+                    None => (pointer.x(), pointer.y()),
+                };
+
+                let mut index = 0;
+                while index != MAX_POINTERS {
+                    let mt = G_INPUT_MT_SCALED.lock().unwrap();
+                    if mt[index] != 0 {
+                        input_event_write(fd, EV_ABS, ABS_MT_SLOT, index.try_into().unwrap());
+                        input_event_write(fd, EV_ABS, ABS_MT_POSITION_X, x as i32);
+                        input_event_write(fd, EV_ABS, ABS_MT_POSITION_Y, y as i32);
+
+                        input_event_write(fd, EV_ABS, ABS_MT_PRESSURE, pressure as i32);
+
+                        input_event_write(fd, EV_SYN, SYN_REPORT, SYN_REPORT);
+                    }
+
+                    index = index + 1;
+                }
+            }
+            MotionAction::Cancel | MotionAction::PointerUp => {
+                let mut mt = G_INPUT_MT_SCALED.lock().unwrap();
+                if mt[pointer_id as usize] == 0 {
+                    return;
+                }
+
+                mt[pointer_id as usize] = 0;
+                input_event_write(fd, EV_ABS, ABS_MT_SLOT, pointer_id);
+                input_event_write(fd, EV_ABS, ABS_MT_TRACKING_ID, -1);
+                input_event_write(fd, EV_SYN, SYN_REPORT, SYN_REPORT);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn generate_touch_device(width: i32, height: i32) -> device_info {
     let iid = input_id {
         product: 0x1,

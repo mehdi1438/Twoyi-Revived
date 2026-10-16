@@ -31,7 +31,12 @@ public class Renderer {
         System.loadLibrary("twoyi");
     }
 
-    public static native void init(Surface surface, String loader, float xdpi, float ydpi, int fps);
+    /**
+     * Boot the renderer. When {@code width}/{@code height} are > 0 they override the host
+     * surface size (Phase 3 custom resolution); when {@code dpi} is > 0 it replaces the host
+     * xdpi/ydpi. Pass 0 to keep the previous behaviour (host window size and host DPI).
+     */
+    public static native void init(Surface surface, String loader, float xdpi, float ydpi, int fps, int width, int height, int dpi);
 
     /**
      * Re-attach an existing renderer to a new surface without booting anything. Used when the
