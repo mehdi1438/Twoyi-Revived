@@ -29,6 +29,17 @@
 
     <PreferenceCategory android:title="@string/settings_category_advanced">
 
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="gpu_acceleration"
+            android:summary="@string/settings_gpu_accel_summary"
+            android:title="@string/settings_key_gpu_accel" />
+
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="vulkan_support"
+            android:summary="@string/settings_vulkan_summary"
+            android:title="@string/settings_key_vulkan" />
 
         <Preference
             android:key="@string/settings_key_replace_rom"

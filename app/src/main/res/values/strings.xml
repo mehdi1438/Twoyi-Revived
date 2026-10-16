@@ -112,4 +112,27 @@
     <string name="floating_minimize">Minimize</string>
     <string name="floating_open_fullscreen">Open fullscreen</string>
     <string name="floating_resize">Resize</string>
+
+    <!-- ROM Manager Strings -->
+    <string name="title_rom_manager" translatable="false">ROM Manager</string>
+    <string name="btn_add_rom" translatable="false">Add ROM</string>
+    <string name="btn_run" translatable="false">Run</string>
+    <string name="btn_backup" translatable="false">Backup</string>
+    <string name="btn_restore" translatable="false">Restore</string>
+    <string name="btn_delete" translatable="false">Delete</string>
+    <string name="active_profile" translatable="false">ACTIVE</string>
+    <string name="label_source" translatable="false">Source: %1$s</string>
+    <string name="label_size" translatable="false">Size: %1$s</string>
+    <string name="label_last_run" translatable="false">Last Run: %1$s</string>
+    <string name="label_root_status" translatable="false">Root: %1$s</string>
+    <string name="root_enabled" translatable="false">Enabled</string>
+    <string name="root_disabled" translatable="false">Disabled</string>
+    <string name="confirm_delete_title" translatable="false">Delete Profile</string>
+    <string name="confirm_delete_msg" translatable="false">Are you sure you want to delete profile \"%1$s\"? All data in this profile will be permanently deleted.</string>
+
+    <string name="btn_menu" translatable="false">ROM Manager</string>
+    <string name="settings_key_gpu_accel" translatable="false">GPU Acceleration</string>
+    <string name="settings_gpu_accel_summary" translatable="false">Enable hardware GPU acceleration for guest rendering</string>
+    <string name="settings_key_vulkan" translatable="false">Vulkan Support</string>
+    <string name="settings_vulkan_summary" translatable="false">Enable Vulkan API rendering backend</string>
 </resources>
