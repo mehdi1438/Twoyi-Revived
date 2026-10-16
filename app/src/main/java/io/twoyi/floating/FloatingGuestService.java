@@ -127,7 +127,7 @@ public class FloatingGuestService extends Service {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
             return;
         }
-        service.runOnUiThread(() -> {
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
             if (service.mMinimized) {
                 service.setMinimized(false);
             }
@@ -258,18 +258,19 @@ public class FloatingGuestService extends Service {
             }
         }
 
-        guestContainer.addView(view, new FrameLayout.LayoutParams(
+        final GuestSurfaceView guestView = view;
+        guestContainer.addView(guestView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         if (handoff) {
             // The activity detaches the view on ITS main thread after startForegroundService
             // returned; that detach (surfaceDestroyed) is suppressed by beginDetachHandoff.
             // End the suppression only once our window's surface is actually alive, so a late
             // destroy callback can never tear the renderer down while we are displaying it.
-            view.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
+            guestView.getHolder().addCallback(new android.view.SurfaceHolder.Callback() {
                 @Override
                 public void surfaceCreated(@NonNull android.view.SurfaceHolder holder) {
-                    view.getHolder().removeCallback(this);
-                    view.endHandoff();
+                    guestView.getHolder().removeCallback(this);
+                    guestView.endHandoff();
                 }
 
                 @Override

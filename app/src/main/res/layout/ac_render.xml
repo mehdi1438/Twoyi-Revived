@@ -50,16 +50,33 @@
 
     </RelativeLayout>
 
-    <!-- Phase 2: floating-window handoff button, shown once the guest has booted. -->
-    <ImageButton
-        android:id="@+id/floatBtn"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
+    <!-- Top overlay control bar: return to ROM Manager menu & floating window button. -->
+    <LinearLayout
+        android:id="@+id/topBarBtns"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
         android:layout_gravity="top|end"
         android:layout_margin="12dp"
-        android:background="?android:attr/selectableItemBackgroundBorderless"
-        android:contentDescription="@string/floating_btn_desc"
-        android:src="@drawable/ic_floating_minimize"
-        android:visibility="gone" />
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <ImageButton
+            android:id="@+id/btnHomeMenu"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="8dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/btn_menu"
+            android:src="@android:drawable/ic_menu_sort_by_size" />
+
+        <ImageButton
+            android:id="@+id/floatBtn"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/floating_btn_desc"
+            android:src="@drawable/ic_floating_minimize" />
+
+    </LinearLayout>
 
 </FrameLayout>

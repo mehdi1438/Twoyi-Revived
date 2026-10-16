@@ -150,13 +150,13 @@ pub fn renderer_attach(
             error!("renderer_attach: ANativeWindow_fromSurface was null!");
             return;
         }
+        let width = unsafe { ndk_sys::ANativeWindow_getWidth(window) };
+        let height = unsafe { ndk_sys::ANativeWindow_getHeight(window) };
         let win = window as *mut c_void;
         // Phase 3: when a custom resolution is active, keep the guest framebuffer size
         // (set by renderer_init) instead of following the new surface's host size.
         let gw = GUEST_WIDTH.load(Ordering::Acquire);
         let gh = GUEST_HEIGHT.load(Ordering::Acquire);
-        let width = unsafe { ndk_sys::ANativeWindow_getWidth(win) };
-        let height = unsafe { ndk_sys::ANativeWindow_getHeight(win) };
         let (sw, sh) = if gw > 0 && gh > 0 { (gw, gh) } else { (width, height) };
         VIEW_WIDTH.store(width, Ordering::Release);
         VIEW_HEIGHT.store(height, Ordering::Release);

@@ -32,6 +32,8 @@ public class AppKV {
     // 是否应该使用第三方 ROM
     public static final String SHOULD_USE_THIRD_PARTY_ROM = "should_use_third_party_rom";
 
+    public static final String ACTIVE_PROFILE_ID = "active_profile_id";
+
     // Phase 3: custom guest resolution and DPI (off by default -> host-window behaviour)
     public static final String CUSTOM_RESOLUTION_ENABLED = "custom_resolution_enabled";
     public static final String CUSTOM_RESOLUTION_WIDTH = "custom_resolution_width";
@@ -117,6 +119,15 @@ public class AppKV {
     @SuppressLint("ApplySharedPref")
     public static void setIntConfig(Context context, String key, int value) {
         getPref(context).edit().putInt(key, value).commit();
+    }
+
+    public static String getStringConfig(Context context, String key, String fallback) {
+        return getPref(context).getString(key, fallback);
+    }
+
+    @SuppressLint("ApplySharedPref")
+    public static void setStringConfig(Context context, String key, String value) {
+        getPref(context).edit().putString(key, value).commit();
     }
 
     private static SharedPreferences getPref(Context context) {

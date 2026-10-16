@@ -19,6 +19,7 @@
 package io.twoyi;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.DisplayMetrics;
@@ -45,6 +46,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.twoyi.floating.FloatingGuestService;
 import io.twoyi.floating.FloatingWindowManager;
+import io.twoyi.ui.GuestSurfaceView;
+import io.twoyi.ui.HomeActivity;
 import io.twoyi.utils.AppKV;
 import io.twoyi.utils.LogEvents;
 import io.twoyi.utils.NavUtils;
@@ -66,6 +69,7 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
     private final AtomicBoolean mIsExtracting = new AtomicBoolean(false);
 
     private ViewGroup mRootView;
+    private View mTopBarBtns;
     private View mFloatButton;
     private static final int REQUEST_OVERLAY_PERMISSION = 0x2F01;
     private boolean mPendingFloatSettings = false;
@@ -122,6 +126,7 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
 
         if (sGuestSurfaceView == null) {
             sGuestSurfaceView = new GuestSurfaceView(this);
+            sGuestSurfaceView.markForBoot();
         } else if (!TwoyiStatusManager.getInstance().isStarted()
                 && !sGuestSurfaceView.isSurfaceAlive()) {
             // Reused view from a previous session whose renderer is not up: this surface will
@@ -134,9 +139,18 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
         mLoadingView = findViewById(R.id.loading);
         mLoadingText = findViewById(R.id.loadingText);
         mBootLogView = findViewById(R.id.bootlog);
+        mTopBarBtns = findViewById(R.id.topBarBtns);
+        mTopBarBtns.setVisibility(View.GONE);
         mFloatButton = findViewById(R.id.floatBtn);
-        mFloatButton.setVisibility(View.GONE);
         mFloatButton.setOnClickListener(v -> goFloating());
+        View btnHomeMenu = findViewById(R.id.btnHomeMenu);
+        if (btnHomeMenu != null) {
+            btnHomeMenu.setOnClickListener(v -> {
+                Intent intent = new Intent(this, HomeActivity.class);
+                intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                startActivity(intent);
+            });
+        }
 
         mLoadingLayout.setVisibility(View.VISIBLE);
         mLoadingView.startAnimation();
@@ -208,8 +222,8 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
     @Override
     protected void onResume() {
         super.onResume();
-        if (mFloatButton != null) {
-            mFloatButton.setVisibility(TwoyiStatusManager.getInstance().isStarted() ? View.VISIBLE : View.GONE);
+        if (mTopBarBtns != null) {
+            mTopBarBtns.setVisibility(TwoyiStatusManager.getInstance().isStarted() ? View.VISIBLE : View.GONE);
         }
         // The overlay settings screen may have been closed via BACK instead of "allow":
         // re-check the grant when we come back so a denied request settles gracefully.
@@ -320,8 +334,8 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
             runOnUiThread(() -> {
                 mLoadingView.stopAnimation();
                 mLoadingLayout.setVisibility(View.GONE);
-                if (mFloatButton != null) {
-                    mFloatButton.setVisibility(View.VISIBLE);
+                if (mTopBarBtns != null) {
+                    mTopBarBtns.setVisibility(View.VISIBLE);
                 }
             });
         }, "waiting-boot").start();
