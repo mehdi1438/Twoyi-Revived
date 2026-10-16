@@ -80,7 +80,13 @@ public class ProfileRepository {
 
     /** The single active rootfs the guest boots from. */
     public File activeRootfsDir() {
+        // Same path RomManager uses for the guest rootfs (Context#getDataDir()).
         return new File(context.getDataDir(), ACTIVE_ROOTFS_NAME);
+    }
+
+    /** True when a guest boot may be in progress; activation must never race it. */
+    public boolean isGuestRunning() {
+        return io.twoyi.TwoyiStatusManager.getInstance().isStarted();
     }
 
     // ---- queries --------------------------------------------------------
@@ -193,6 +199,10 @@ public class ProfileRepository {
      */
     public synchronized boolean activate(Profile target) {
         if (target == null) {
+            return false;
+        }
+        if (isGuestRunning()) {
+            Log.w(TAG, "refusing to swap rootfs while guest is running");
             return false;
         }
         File active = activeRootfsDir();
