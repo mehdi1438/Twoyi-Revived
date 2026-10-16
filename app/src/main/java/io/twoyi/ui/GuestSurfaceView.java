@@ -15,6 +15,7 @@ import android.view.SurfaceView;
 import androidx.annotation.NonNull;
 
 import io.twoyi.Renderer;
+import io.twoyi.utils.AppKV;
 
 /**
  * The guest display surface, decoupled from any specific window so that it can be
@@ -44,6 +45,16 @@ public class GuestSurfaceView extends SurfaceView {
         return new float[]{dm.xdpi, dm.ydpi};
     }
 
+    /** Guest width/height/DPI when custom resolution is enabled, otherwise 0 (host behavior). */
+    private int[] guestDimsOrZero() {
+        if (AppKV.isCustomResolutionEnabled(getContext())) {
+            return new int[]{AppKV.getCustomWidth(getContext()),
+                    AppKV.getCustomHeight(getContext()),
+                    AppKV.getCustomDpi(getContext())};
+        }
+        return new int[]{0, 0, 0};
+    }
+
     private final SurfaceHolder.Callback mCallback = new SurfaceHolder.Callback() {
         @Override
         public void surfaceCreated(@NonNull SurfaceHolder holder) {
@@ -56,9 +67,11 @@ public class GuestSurfaceView extends SurfaceView {
                 // process gets spawned (Renderer.init -> Rust renderer_init -> fork ./init).
                 mShouldBootOnSurface = false;
                 float[] dpi = hostDpi(getContext());
+                int[] guest = guestDimsOrZero();
                 Renderer.init(holder.getSurface(),
                         io.twoyi.utils.RomManager.getLoaderPath(getContext()),
-                        dpi[0], dpi[1], 45);
+                        dpi[0], dpi[1], AppKV.getFpsCap(getContext()),
+                        guest[0], guest[1], guest[2]);
                 return;
             }
             // Already-booted handoff (activity <-> overlay): just re-point the renderer at
@@ -71,7 +84,14 @@ public class GuestSurfaceView extends SurfaceView {
             if (mDetachInProgress || !holder.getSurface().isValid()) {
                 return;
             }
-            Renderer.resetWindow(holder.getSurface(), 0, 0, width, height);
+            // With custom resolution on, the guest framebuffer keeps its own dimensions;
+            // reset the sub-window to those instead of the host view size.
+            int[] guest = guestDimsOrZero();
+            if (guest[0] > 0 && guest[1] > 0) {
+                Renderer.resetWindow(holder.getSurface(), 0, 0, guest[0], guest[1]);
+            } else {
+                Renderer.resetWindow(holder.getSurface(), 0, 0, width, height);
+            }
         }
 
         @Override
@@ -99,9 +119,11 @@ public class GuestSurfaceView extends SurfaceView {
     public void bootOnCurrentSurface(android.view.Surface surface) {
         mShouldBootOnSurface = false;
         float[] dpi = hostDpi(getContext());
+        int[] guest = guestDimsOrZero();
         Renderer.init(surface,
                 io.twoyi.utils.RomManager.getLoaderPath(getContext()),
-                dpi[0], dpi[1], 45);
+                dpi[0], dpi[1], AppKV.getFpsCap(getContext()),
+                guest[0], guest[1], guest[2]);
     }
 
     public GuestSurfaceView(Context context) {

@@ -387,18 +387,8 @@ public class Render2Activity extends Activity implements View.OnTouchListener {
     }
 
     private float getBestFps() {
-        WindowManager windowManager = getWindowManager();
-        Display defaultDisplay = windowManager.getDefaultDisplay();
-        Display.Mode[] supportedModes = defaultDisplay.getSupportedModes();
-        float fps = 45;
-        for (Display.Mode supportedMode : supportedModes) {
-            float refreshRate = supportedMode.getRefreshRate();
-            if (refreshRate > fps) {
-                // fps = refreshRate;
-            }
-        }
-
-        Log.w(TAG, "current fps: " + fps);
-        return fps;
+        // The guest FPS cap is now a user setting (AppKV.getFpsCap), applied at boot in
+        // GuestSurfaceView via Renderer.init. This method is unused; kept only as a stub.
+        return AppKV.getFpsCap(this);
     }
 }

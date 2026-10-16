@@ -113,6 +113,53 @@
     <string name="floating_open_fullscreen">Open fullscreen</string>
     <string name="floating_resize">Resize</string>
 
+    <!-- Phase 3: custom resolution and DPI -->
+    <string name="settings_custom_width_key">custom_resolution_width</string>
+    <string name="settings_custom_height_key">custom_resolution_height</string>
+    <string name="settings_custom_dpi_key">custom_dpi</string>
+    <string name="settings_custom_preset_key">custom_resolution_preset</string>
+    <string name="settings_key_restore_defaults">restore_display_defaults</string>
+    <string name="settings_key_restart_note">display_restart_note</string>
+    <string name="settings_category_display">Display</string>
+    <string name="settings_custom_resolution_title">Custom resolution</string>
+    <string name="settings_custom_resolution_summary">Render the guest at a fixed size instead of the host window size. Off by default.</string>
+    <string name="settings_key_custom_resolution">custom_resolution_switch</string>
+    <string name="settings_display_width_title">Width (px)</string>
+    <string name="settings_display_height_title">Height (px)</string>
+    <string name="settings_dpi_title">Density (DPI)</string>
+    <string name="settings_display_preset_title">Preset</string>
+    <string-array name="display_presets">
+        <item>Default (720x1280 @ 320 DPI)</item>
+        <item>480x854</item>
+        <item>720x1280</item>
+        <item>1080x1920</item>
+    </string-array>
+    <string name="settings_restore_defaults_title">Restore defaults</string>
+    <string name="settings_restore_defaults_summary">Reset width, height and DPI to defaults and disable custom resolution</string>
+    <string name="settings_restart_required_note">A restart of Twoyi (reboot or kill and reopen) is required for display changes to take effect.</string>
+    <string name="settings_invalid_size">Invalid size: width and height must be between %1$d and %2$d pixels.</string>
+    <string name="settings_invalid_dpi">Invalid DPI: must be between %1$d and %2$d.</string>
+    <string name="settings_display_saved">Display settings saved.</string>
+
+    <!-- FPS cap setting -->
+    <string name="settings_key_fps_cap">fps_cap</string>
+    <string name="settings_fps_title">Frame rate cap</string>
+    <string name="settings_fps_summary">Requested guest frame rate. Applies on next boot/reboot of the guest.</string>
+    <string name="settings_fps_default">45</string>
+    <string-array name="fps_choices">
+        <item>30 fps</item>
+        <item>45 fps (default)</item>
+        <item>60 fps</item>
+        <item>90 fps</item>
+        <item>120 fps</item>
+    </string-array>
+    <string-array name="fps_values">
+        <item>30</item>
+        <item>45</item>
+        <item>60</item>
+        <item>90</item>
+        <item>120</item>
+    </string-array>
     <!-- ROM Manager Strings -->
     <string name="title_rom_manager" translatable="false">ROM Manager</string>
     <string name="btn_add_rom" translatable="false">Add ROM</string>
