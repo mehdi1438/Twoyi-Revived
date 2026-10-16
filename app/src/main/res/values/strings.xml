@@ -140,4 +140,24 @@
     <string name="settings_invalid_size">Invalid size: width and height must be between %1$d and %2$d pixels.</string>
     <string name="settings_invalid_dpi">Invalid DPI: must be between %1$d and %2$d.</string>
     <string name="settings_display_saved">Display settings saved.</string>
+
+    <!-- FPS cap setting -->
+    <string name="settings_key_fps_cap">fps_cap</string>
+    <string name="settings_fps_title">Frame rate cap</string>
+    <string name="settings_fps_summary">Requested guest frame rate. Applies on next boot/reboot of the guest.</string>
+    <string name="settings_fps_default">45</string>
+    <string-array name="fps_choices">
+        <item>30 fps</item>
+        <item>45 fps (default)</item>
+        <item>60 fps</item>
+        <item>90 fps</item>
+        <item>120 fps</item>
+    </string-array>
+    <string-array name="fps_values">
+        <item>30</item>
+        <item>45</item>
+        <item>60</item>
+        <item>90</item>
+        <item>120</item>
+    </string-array>
 </resources>

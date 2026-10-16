@@ -70,7 +70,8 @@ public class GuestSurfaceView extends SurfaceView {
                 int[] guest = guestDimsOrZero();
                 Renderer.init(holder.getSurface(),
                         io.twoyi.utils.RomManager.getLoaderPath(getContext()),
-                        dpi[0], dpi[1], 45, guest[0], guest[1], guest[2]);
+                        dpi[0], dpi[1], AppKV.getFpsCap(getContext()),
+                        guest[0], guest[1], guest[2]);
                 return;
             }
             // Already-booted handoff (activity <-> overlay): just re-point the renderer at
@@ -121,7 +122,8 @@ public class GuestSurfaceView extends SurfaceView {
         int[] guest = guestDimsOrZero();
         Renderer.init(surface,
                 io.twoyi.utils.RomManager.getLoaderPath(getContext()),
-                dpi[0], dpi[1], 45, guest[0], guest[1], guest[2]);
+                dpi[0], dpi[1], AppKV.getFpsCap(getContext()),
+                guest[0], guest[1], guest[2]);
     }
 
     public GuestSurfaceView(Context context) {

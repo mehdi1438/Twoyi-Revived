@@ -37,6 +37,9 @@ public class AppKV {
     public static final String CUSTOM_RESOLUTION_WIDTH = "custom_resolution_width";
     public static final String CUSTOM_RESOLUTION_HEIGHT = "custom_resolution_height";
     public static final String CUSTOM_DPI = "custom_dpi";
+    public static final String FPS_CAP = "fps_cap";
+
+    public static final int DEFAULT_FPS_CAP = 45;
 
     public static final int DEFAULT_CUSTOM_WIDTH = 720;
     public static final int DEFAULT_CUSTOM_HEIGHT = 1280;
@@ -77,6 +80,15 @@ public class AppKV {
 
     public static int getCustomDpi(Context context) {
         return getIntConfig(context, CUSTOM_DPI, DEFAULT_CUSTOM_DPI);
+    }
+
+    /** Requested guest FPS cap: 30, 45 (default), 60, 90 or 120. */
+    public static int getFpsCap(Context context) {
+        int fps = getIntConfig(context, FPS_CAP, DEFAULT_FPS_CAP);
+        if (fps != 30 && fps != 60 && fps != 90 && fps != 120) {
+            fps = DEFAULT_FPS_CAP;
+        }
+        return fps;
     }
 
     @SuppressLint("ApplySharedPref")

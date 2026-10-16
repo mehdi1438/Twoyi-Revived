@@ -68,6 +68,14 @@
             android:summary="@string/settings_restore_defaults_summary"
             android:title="@string/settings_restore_defaults_title" />
 
+        <ListPreference
+            android:defaultValue="@string/settings_fps_default"
+            android:entries="@array/fps_choices"
+            android:entryValues="@array/fps_values"
+            android:key="@string/settings_key_fps_cap"
+            android:summary="@string/settings_fps_summary"
+            android:title="@string/settings_fps_title" />
+
         <Preference
             android:enabled="false"
             android:key="@string/settings_key_restart_note"

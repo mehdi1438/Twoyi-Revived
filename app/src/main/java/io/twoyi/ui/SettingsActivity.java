@@ -286,6 +286,33 @@ public class SettingsActivity extends AppCompatActivity {
                     return true;
                 });
             }
+
+            setupFpsPreference();
+        }
+
+        private void setupFpsPreference() {
+            final Context context = getActivity();
+            final ListPreference fpsPref = findPreference(getString(R.string.settings_key_fps_cap));
+            if (fpsPref == null) {
+                return;
+            }
+            fpsPref.setValue(String.valueOf(AppKV.getFpsCap(context)));
+            fpsPref.setSummary(fpsPref.getEntry());
+            fpsPref.setOnPreferenceChangeListener((preference, newValue) -> {
+                int fps;
+                try {
+                    fps = Integer.parseInt(String.valueOf(newValue));
+                } catch (NumberFormatException e) {
+                    return false;
+                }
+                if (fps != 30 && fps != 45 && fps != 60 && fps != 90 && fps != 120) {
+                    return false;
+                }
+                AppKV.setIntConfig(getActivity(), AppKV.FPS_CAP, fps);
+                preference.setSummary(fps + " fps");
+                Toast.makeText(getActivity(), R.string.settings_restart_required_note, Toast.LENGTH_LONG).show();
+                return true;
+            });
         }
 
         private boolean onSizeChanged(Preference preference, Object newValue) {
