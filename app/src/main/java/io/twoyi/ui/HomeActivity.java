@@ -6,69 +6,56 @@
 
 package io.twoyi.ui;
 
+import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.Menu;
 import android.view.MenuItem;
-import android.widget.Button;
+import android.view.View;
 import android.widget.EditText;
-import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.ActionBar;
-import androidx.appcompat.app.AlertDialog;
-import androidx.appcompat.app.AppCompatActivity;
-import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import java.io.IOException;
 import java.util.List;
 
 import io.twoyi.R;
+import io.twoyi.Render2Activity;
+import io.twoyi.TwoyiStatusManager;
+import io.twoyi.profile.Profile;
 import io.twoyi.profile.ProfileAdapter;
-import io.twoyi.profile.ProfileManager;
-import io.twoyi.profile.RomProfile;
+import io.twoyi.profile.ProfileRepository;
 
 /**
- * Home Activity displaying list of ROM Profiles (VMOS Pro card style).
+ * Home screen: 2-column grid of ROM profiles. Run = activate the profile's
+ * rootfs (rename swap, never while a guest runs) and start Render2Activity.
  */
-public class HomeActivity extends AppCompatActivity implements ProfileAdapter.OnProfileActionListener {
+public class HomeActivity extends Activity implements ProfileAdapter.Listener {
 
-    private ProfileManager profileManager;
-    private ProfileAdapter profileAdapter;
+    private static final int MENU_SETTINGS = 100;
+
+    private ProfileRepository repo;
+    private ProfileAdapter adapter;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_home);
 
-        ActionBar actionBar = getSupportActionBar();
-        if (actionBar != null) {
-            actionBar.setTitle(R.string.title_rom_manager);
-        }
+        repo = new ProfileRepository(this);
 
-        profileManager = new ProfileManager(this);
+        RecyclerView recycler = findViewById(R.id.recyclerProfiles);
+        recycler.setLayoutManager(new GridLayoutManager(this, 2));
+        adapter = new ProfileAdapter(this, this);
+        recycler.setAdapter(adapter);
 
-        RecyclerView recyclerView = findViewById(R.id.recyclerViewProfiles);
-        recyclerView.setLayoutManager(new LinearLayoutManager(this));
-
-        profileAdapter = new ProfileAdapter(this, this);
-        recyclerView.setAdapter(profileAdapter);
-
-        Button btnAddRom = findViewById(R.id.btnAddRom);
-        btnAddRom.setOnClickListener(v ->
-            Toast.makeText(this, "Add ROM flow will be available in Step 4", Toast.LENGTH_SHORT).show()
-        );
-
-        Button btnRestoreRom = findViewById(R.id.btnRestoreRom);
-        btnRestoreRom.setOnClickListener(v ->
-            Toast.makeText(this, "Restore flow will be available in Step 5", Toast.LENGTH_SHORT).show()
-        );
-
-        loadProfiles();
+        findViewById(R.id.fabAddRom).setOnClickListener(v ->
+                Toast.makeText(this, R.string.home_add_todo, Toast.LENGTH_SHORT).show());
     }
 
     @Override
@@ -78,22 +65,20 @@ public class HomeActivity extends AppCompatActivity implements ProfileAdapter.On
     }
 
     private void loadProfiles() {
-        List<RomProfile> profiles = profileManager.getAllProfiles();
-        String activeId = profileManager.getActiveProfileId();
-        profileAdapter.setProfiles(profiles, activeId);
+        List<Profile> profiles = repo.list();
+        adapter.setItems(profiles, repo.activeId());
     }
 
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
-        menu.add(0, 1, 0, R.string.title_settings)
-                .setIcon(android.R.drawable.ic_menu_preferences)
-                .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+        menu.add(0, MENU_SETTINGS, 0, R.string.title_settings)
+                .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
         return true;
     }
 
     @Override
     public boolean onOptionsItemSelected(@NonNull MenuItem item) {
-        if (item.getItemId() == 1) {
+        if (item.getItemId() == MENU_SETTINGS) {
             startActivity(new Intent(this, SettingsActivity.class));
             return true;
         }
@@ -101,96 +86,75 @@ public class HomeActivity extends AppCompatActivity implements ProfileAdapter.On
     }
 
     @Override
-    public void onRun(RomProfile profile) {
-        if (io.twoyi.TwoyiStatusManager.getInstance().isStarted()) {
-            Toast.makeText(this, "Guest is currently running. Reboot or stop the guest first.", Toast.LENGTH_SHORT).show();
+    public void onRun(Profile profile) {
+        if (TwoyiStatusManager.getInstance().isStarted()) {
+            Toast.makeText(this, R.string.home_guest_running_refuse,
+                    Toast.LENGTH_SHORT).show();
             return;
         }
-
-        boolean success = profileManager.swapToProfile(profile.getId());
-        if (success) {
-            startActivity(new Intent(this, io.twoyi.Render2Activity.class));
+        if (!profile.id.equals(repo.activeId())
+                && !repo.storedRootfs(profile).isDirectory()) {
+            Toast.makeText(this, R.string.home_no_rootfs, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (repo.activate(profile)) {
+            profile.lastRun = System.currentTimeMillis();
+            repo.save(profile);
+            startActivity(new Intent(this, Render2Activity.class));
         } else {
-            Toast.makeText(this, "Failed to swap profile", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, R.string.home_activate_failed, Toast.LENGTH_SHORT).show();
         }
+        loadProfiles();
     }
 
     @Override
-    public void onConfig(RomProfile profile) {
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int pad = 32;
-        layout.setPadding(pad, pad, pad, pad);
+    public void onOverflow(View anchor, final Profile profile) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add(0, 1, 0, R.string.home_menu_rename);
+        menu.getMenu().add(0, 2, 1, R.string.home_menu_backup);
+        menu.getMenu().add(0, 3, 2, R.string.home_menu_delete);
+        menu.setOnMenuItemClickListener(item -> {
+            int id = item.getItemId();
+            if (id == 1) {
+                promptRename(profile);
+                return true;
+            }
+            if (id == 2) {
+                Toast.makeText(this, R.string.home_backup_todo,
+                        Toast.LENGTH_SHORT).show();
+                return true;
+            }
+            if (id == 3) {
+                if (profile.id.equals(repo.activeId())) {
+                    Toast.makeText(this, R.string.confirm_delete_title,
+                            Toast.LENGTH_SHORT).show();
+                    return true;
+                }
+                repo.delete(profile);
+                loadProfiles();
+                return true;
+            }
+            return false;
+        });
+        menu.show();
+    }
 
-        final EditText inputName = new EditText(this);
-        inputName.setHint("Profile Name");
-        inputName.setText(profile.getName());
-        layout.addView(inputName);
+    private void promptRename(final Profile profile) {
+        final EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        input.setHint(R.string.home_rename_hint);
+        input.setText(profile.name);
 
-        final EditText inputRes = new EditText(this);
-        inputRes.setHint("Resolution (e.g. 1080x2340)");
-        inputRes.setText(profile.getResolution());
-        layout.addView(inputRes);
-
-        final EditText inputDpi = new EditText(this);
-        inputDpi.setHint("DPI (e.g. 480)");
-        inputDpi.setInputType(InputType.TYPE_CLASS_NUMBER);
-        inputDpi.setText(String.valueOf(profile.getDpi()));
-        layout.addView(inputDpi);
-
-        final EditText inputFps = new EditText(this);
-        inputFps.setHint("FPS (e.g. 45 or 60)");
-        inputFps.setInputType(InputType.TYPE_CLASS_NUMBER);
-        inputFps.setText(String.valueOf(profile.getFps()));
-        layout.addView(inputFps);
-
-        new AlertDialog.Builder(this)
-                .setTitle("Configure ROM Profile")
-                .setView(layout)
-                .setPositiveButton("Save", (dialog, which) -> {
-                    String newName = inputName.getText().toString().trim();
-                    String newRes = inputRes.getText().toString().trim();
-                    String dpiStr = inputDpi.getText().toString().trim();
-                    String fpsStr = inputFps.getText().toString().trim();
-
-                    if (!newName.isEmpty()) profile.setName(newName);
-                    if (!newRes.isEmpty()) profile.setResolution(newRes);
-                    try {
-                        if (!dpiStr.isEmpty()) profile.setDpi(Integer.parseInt(dpiStr));
-                    } catch (NumberFormatException ignored) {}
-                    try {
-                        if (!fpsStr.isEmpty()) profile.setFps(Integer.parseInt(fpsStr));
-                    } catch (NumberFormatException ignored) {}
-
-                    try {
-                        profileManager.saveProfile(profile);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle(R.string.home_menu_rename)
+                .setView(input)
+                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                    String name = input.getText().toString().trim();
+                    if (!name.isEmpty()) {
+                        profile.name = name;
+                        repo.save(profile);
                         loadProfiles();
-                        Toast.makeText(this, "Profile updated", Toast.LENGTH_SHORT).show();
-                    } catch (IOException e) {
-                        Toast.makeText(this, "Failed to save config: " + e.getMessage(), Toast.LENGTH_SHORT).show();
                     }
-                })
-                .setNegativeButton(android.R.string.cancel, null)
-                .show();
-    }
-
-    @Override
-    public void onBackup(RomProfile profile) {
-        Toast.makeText(this, "Backup flow will be available in Step 5", Toast.LENGTH_SHORT).show();
-    }
-
-    @Override
-    public void onDelete(RomProfile profile) {
-        if (profile.getId().equals(profileManager.getActiveProfileId())) {
-            Toast.makeText(this, "Cannot delete the active profile!", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        new AlertDialog.Builder(this)
-                .setTitle(R.string.confirm_delete_title)
-                .setMessage(getString(R.string.confirm_delete_msg, profile.getName()))
-                .setPositiveButton(R.string.btn_delete, (dialog, which) -> {
-                    profileManager.deleteProfile(profile.getId());
-                    loadProfiles();
                 })
                 .setNegativeButton(android.R.string.cancel, null)
                 .show();

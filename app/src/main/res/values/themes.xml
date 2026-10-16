@@ -20,6 +20,19 @@
         <!-- Customize your theme here. -->
     </style>
 
+    <style name="Theme.Twoyi.Home" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/home_primary</item>
+        <item name="colorPrimaryVariant">@color/home_primary</item>
+        <item name="colorOnPrimary">@color/black</item>
+        <item name="colorSecondary">@color/home_accent</item>
+        <item name="colorSecondaryVariant">@color/home_accent</item>
+        <item name="colorOnSecondary">@color/black</item>
+        <item name="colorError">@color/home_error</item>
+        <item name="android:colorBackground">@color/home_background</item>
+        <item name="android:windowBackground">@color/home_background</item>
+        <item name="android:statusBarColor">@color/home_background</item>
+    </style>
+
     <style name="Theme.Twoyi.FullScreen" parent="@style/ThemeOverlay.AppCompat.Dark">
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowActionBar">false</item>

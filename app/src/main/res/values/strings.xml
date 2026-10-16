@@ -182,4 +182,24 @@
     <string name="settings_gpu_accel_summary" translatable="false">Enable hardware GPU acceleration for guest rendering</string>
     <string name="settings_key_vulkan" translatable="false">Vulkan Support</string>
     <string name="settings_vulkan_summary" translatable="false">Enable Vulkan API rendering backend</string>
+
+    <!-- Home screen -->
+    <string name="home_title" translatable="false">Twoyi</string>
+    <string name="home_status_active" translatable="false">Active</string>
+    <string name="home_status_stored" translatable="false">Stored</string>
+    <string name="home_no_preview" translatable="false">No preview</string>
+    <string name="home_meta_default" translatable="false">default</string>
+    <string name="home_meta_resolution" translatable="false">%1$d x %2$d - %3$d fps</string>
+    <string name="home_menu_rename" translatable="false">Rename</string>
+    <string name="home_menu_backup" translatable="false">Backup</string>
+    <string name="home_menu_delete" translatable="false">Delete</string>
+    <string name="home_btn_run" translatable="false">Run</string>
+    <string name="home_preview_desc" translatable="false">ROM preview</string>
+    <string name="home_overflow_desc" translatable="false">More options</string>
+    <string name="home_guest_running_refuse" translatable="false">A guest is running. Stop it first.</string>
+    <string name="home_activate_failed" translatable="false">Failed to activate this ROM.</string>
+    <string name="home_no_rootfs" translatable="false">This profile has no installed ROM yet.</string>
+    <string name="home_add_todo" translatable="false">Add ROM arrives in a later step.</string>
+    <string name="home_backup_todo" translatable="false">Backup arrives in a later step.</string>
+    <string name="home_rename_hint" translatable="false">ROM name</string>
 </resources>
